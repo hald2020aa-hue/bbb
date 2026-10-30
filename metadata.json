@@ -1,0 +1,6 @@
+{
+  "name": "مكتبة المانجا والمواقع",
+  "description": "تطبيق متكامل لإدارة وتصفح مواقع المانجا والويب مع حفظ المفضلة والسجل والتخزين المحلي",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

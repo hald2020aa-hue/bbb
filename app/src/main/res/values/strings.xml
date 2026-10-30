@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">مكتبة المانجا والمواقع</string>
+    <string name="drawer_login_prompt">انقر هنا لتسجيل الدخول</string>
+    <string name="nav_storage">التخزين</string>
+    <string name="nav_recommendations">التوصيات</string>
+    <string name="nav_updates">التحديثات</string>
+    <string name="nav_favorites">المفضلة</string>
+    <string name="nav_history">السجل</string>
+    <string name="nav_manage_sites">إدارة المواقع</string>
+    <string name="nav_added_sites">المواقع المضافة</string>
+    <string name="nav_settings">الاعدادات</string>
+    <string name="empty_sites_message">لم تضف أي مواقع بعد</string>
+    <string name="add_site">إضافة موقع</string>
+    <string name="browser">المتصفح</string>
+    <string name="add_site_manually">إضافة موقع يدويًا</string>
+    <string name="enter_site_url">أدخل عنوان موقع</string>
+    <string name="site_name_label">اسم الموقع</string>
+    <string name="confirm">تأكيد</string>
+    <string name="cancel">إلغاء</string>
+    <string name="add">إضافة</string>
+    <string name="added_successfully">تم الإضافة بنجاح</string>
+    <string name="restart_notice">عليك إغلاق التطبيق واعادة تشغيله من اجل تطبيق التغييرات</string>
+    <string name="empty_storage_message">لم تحفظ اي عمل في التخزين.</string>
+    <string name="import_action">استيراد</string>
+    <string name="continue_reading">متابعة</string>
+</resources>
