@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "app_user_settings")
@@ -52,7 +53,27 @@ data class UserSettings(
     val userProfileEmail: String = "",
     val searchHistoryCount: Int = 0,
     val totalReadingSeconds: Long = 35L,
-    val browserCoachmarkShown: Boolean = false
+    val browserCoachmarkShown: Boolean = false,
+    // Reader UX Enhancements
+    val autoCropBorders: Boolean = false,
+    val preloadNextChapter: Boolean = true,
+    val tapZoneMode: String = "افتراضي (يمين/يسار/منتصف)", // "افتراضي (يمين/يسار/منتصف)", "معكوس (يسار للتالي)", "منتصف فقط للقائمة", "شبيه كيندل"
+    // Downloads & Offline Storage
+    val autoDeleteReadChapters: Boolean = false,
+    val keepLastReadChaptersCount: Int = 2,
+    // Network & DNS over HTTPS (DoH)
+    val dohProvider: String = "معطل", // "معطل", "Cloudflare (1.1.1.1)", "Google (8.8.8.8)", "AdGuard"
+    // Global Tracking (AniList / MyAnimeList)
+    val anilistUsername: String = "",
+    val anilistToken: String = "",
+    val malUsername: String = "",
+    val autoSyncTracking: Boolean = true,
+    val anilistTrackingEnabled: Boolean = false,
+    val malTrackingEnabled: Boolean = false,
+    // Security & Privacy
+    val appLockEnabled: Boolean = false,
+    val appLockPin: String = "1234",
+    val secureScreenEnabled: Boolean = false
 )
 
 class UserSettingsDataStore(private val context: Context) {
@@ -95,6 +116,21 @@ class UserSettingsDataStore(private val context: Context) {
         val SEARCH_HISTORY_COUNT = intPreferencesKey("search_history_count")
         val TOTAL_READING_SECONDS = longPreferencesKey("total_reading_seconds")
         val BROWSER_COACHMARK_SHOWN = booleanPreferencesKey("browser_coachmark_shown")
+        val AUTO_CROP_BORDERS = booleanPreferencesKey("auto_crop_borders")
+        val PRELOAD_NEXT_CHAPTER = booleanPreferencesKey("preload_next_chapter")
+        val TAP_ZONE_MODE = stringPreferencesKey("tap_zone_mode")
+        val AUTO_DELETE_READ_CHAPTERS = booleanPreferencesKey("auto_delete_read_chapters")
+        val KEEP_LAST_READ_CHAPTERS_COUNT = intPreferencesKey("keep_last_read_chapters_count")
+        val DOH_PROVIDER = stringPreferencesKey("doh_provider")
+        val ANILIST_USERNAME = stringPreferencesKey("anilist_username")
+        val ANILIST_TOKEN = stringPreferencesKey("anilist_token")
+        val MAL_USERNAME = stringPreferencesKey("mal_username")
+        val AUTO_SYNC_TRACKING = booleanPreferencesKey("auto_sync_tracking")
+        val ANILIST_TRACKING_ENABLED = booleanPreferencesKey("anilist_tracking_enabled")
+        val MAL_TRACKING_ENABLED = booleanPreferencesKey("mal_tracking_enabled")
+        val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
+        val APP_LOCK_PIN = stringPreferencesKey("app_lock_pin")
+        val SECURE_SCREEN_ENABLED = booleanPreferencesKey("secure_screen_enabled")
     }
 
     val settingsFlow: Flow<UserSettings> = context.dataStore.data.map { prefs ->
@@ -135,7 +171,22 @@ class UserSettingsDataStore(private val context: Context) {
             userProfileEmail = prefs[Keys.USER_PROFILE_EMAIL] ?: "",
             searchHistoryCount = prefs[Keys.SEARCH_HISTORY_COUNT] ?: 0,
             totalReadingSeconds = prefs[Keys.TOTAL_READING_SECONDS] ?: 35L,
-            browserCoachmarkShown = prefs[Keys.BROWSER_COACHMARK_SHOWN] ?: false
+            browserCoachmarkShown = prefs[Keys.BROWSER_COACHMARK_SHOWN] ?: false,
+            autoCropBorders = prefs[Keys.AUTO_CROP_BORDERS] ?: false,
+            preloadNextChapter = prefs[Keys.PRELOAD_NEXT_CHAPTER] ?: true,
+            tapZoneMode = prefs[Keys.TAP_ZONE_MODE] ?: "افتراضي (يمين/يسار/منتصف)",
+            autoDeleteReadChapters = prefs[Keys.AUTO_DELETE_READ_CHAPTERS] ?: false,
+            keepLastReadChaptersCount = prefs[Keys.KEEP_LAST_READ_CHAPTERS_COUNT] ?: 2,
+            dohProvider = prefs[Keys.DOH_PROVIDER] ?: "معطل",
+            anilistUsername = prefs[Keys.ANILIST_USERNAME] ?: "",
+            anilistToken = prefs[Keys.ANILIST_TOKEN] ?: "",
+            malUsername = prefs[Keys.MAL_USERNAME] ?: "",
+            autoSyncTracking = prefs[Keys.AUTO_SYNC_TRACKING] ?: true,
+            anilistTrackingEnabled = prefs[Keys.ANILIST_TRACKING_ENABLED] ?: false,
+            malTrackingEnabled = prefs[Keys.MAL_TRACKING_ENABLED] ?: false,
+            appLockEnabled = prefs[Keys.APP_LOCK_ENABLED] ?: false,
+            appLockPin = prefs[Keys.APP_LOCK_PIN] ?: "1234",
+            secureScreenEnabled = prefs[Keys.SECURE_SCREEN_ENABLED] ?: false
         )
     }
 
@@ -151,6 +202,12 @@ class UserSettingsDataStore(private val context: Context) {
                 "loadPagesMode" -> prefs[Keys.LOAD_PAGES_MODE] = value
                 "userProfileName" -> prefs[Keys.USER_PROFILE_NAME] = value
                 "userProfileEmail" -> prefs[Keys.USER_PROFILE_EMAIL] = value
+                "tapZoneMode" -> prefs[Keys.TAP_ZONE_MODE] = value
+                "dohProvider" -> prefs[Keys.DOH_PROVIDER] = value
+                "anilistUsername" -> prefs[Keys.ANILIST_USERNAME] = value
+                "anilistToken" -> prefs[Keys.ANILIST_TOKEN] = value
+                "malUsername" -> prefs[Keys.MAL_USERNAME] = value
+                "appLockPin" -> prefs[Keys.APP_LOCK_PIN] = value
             }
         }
     }
@@ -181,6 +238,14 @@ class UserSettingsDataStore(private val context: Context) {
                 "checkNewChaptersWifiOnly" -> prefs[Keys.CHECK_NEW_CHAPTERS_WIFI] = value
                 "downloadWifiOnly" -> prefs[Keys.DOWNLOAD_WIFI_ONLY] = value
                 "browserCoachmarkShown" -> prefs[Keys.BROWSER_COACHMARK_SHOWN] = value
+                "autoCropBorders" -> prefs[Keys.AUTO_CROP_BORDERS] = value
+                "preloadNextChapter" -> prefs[Keys.PRELOAD_NEXT_CHAPTER] = value
+                "autoDeleteReadChapters" -> prefs[Keys.AUTO_DELETE_READ_CHAPTERS] = value
+                "autoSyncTracking" -> prefs[Keys.AUTO_SYNC_TRACKING] = value
+                "anilistTrackingEnabled" -> prefs[Keys.ANILIST_TRACKING_ENABLED] = value
+                "malTrackingEnabled" -> prefs[Keys.MAL_TRACKING_ENABLED] = value
+                "appLockEnabled" -> prefs[Keys.APP_LOCK_ENABLED] = value
+                "secureScreenEnabled" -> prefs[Keys.SECURE_SCREEN_ENABLED] = value
             }
         }
     }
@@ -191,6 +256,7 @@ class UserSettingsDataStore(private val context: Context) {
                 "customBrightnessLevel" -> prefs[Keys.CUSTOM_BRIGHTNESS_LEVEL] = value
                 "maxConcurrentDownloads" -> prefs[Keys.MAX_CONCURRENT_DOWNLOADS] = value
                 "searchHistoryCount" -> prefs[Keys.SEARCH_HISTORY_COUNT] = value
+                "keepLastReadChaptersCount" -> prefs[Keys.KEEP_LAST_READ_CHAPTERS_COUNT] = value
             }
         }
     }
@@ -227,5 +293,9 @@ class UserSettingsDataStore(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[Keys.TOTAL_READING_SECONDS] = 0L
         }
+    }
+
+    suspend fun getSnapshot(): UserSettings {
+        return settingsFlow.first()
     }
 }

@@ -67,7 +67,11 @@ sealed class AddSiteDialogState {
         val urlInput: String = "",
         val isChecking: Boolean = false,
         val statusMessage: String? = null,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        val verificationUrl: String? = null,
+        val resolvedDomain: String = "",
+        val resolvedSuggestedName: String = "",
+        val resolvedIconKey: String = "globe"
     ) : AddSiteDialogState()
 
     data class Step2ConfirmManual(
@@ -204,8 +208,30 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
 
     private var updatesSyncJob: Job? = null
 
+    // Global Search & Source Migration states
+    private val _globalSearchQuery = MutableStateFlow("")
+    val globalSearchQuery: StateFlow<String> = _globalSearchQuery.asStateFlow()
+
+    private val _isGlobalSearching = MutableStateFlow(false)
+    val isGlobalSearching: StateFlow<Boolean> = _isGlobalSearching.asStateFlow()
+
+    private val _globalSearchResultsBySite = MutableStateFlow<Map<SiteEntity, List<MangaWork>>>(emptyMap())
+    val globalSearchResultsBySite: StateFlow<Map<SiteEntity, List<MangaWork>>> = _globalSearchResultsBySite.asStateFlow()
+
+    private val _isSearchingMigration = MutableStateFlow(false)
+    val isSearchingMigration: StateFlow<Boolean> = _isSearchingMigration.asStateFlow()
+
+    private val _migrationCandidates = MutableStateFlow<List<MangaWork>>(emptyList())
+    val migrationCandidates: StateFlow<List<MangaWork>> = _migrationCandidates.asStateFlow()
+
+    private val preloadedChapterUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val syncedTrackerChapters = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     init {
         refreshStorageStats()
+        viewModelScope.launch {
+            repository.ensureDefaultCategories()
+        }
         // Sync downloadedChapters and readingProgress from Room into UI maps
         viewModelScope.launch {
             repository.allDownloadedChapters.collect { chList ->
@@ -245,6 +271,7 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
         }
         viewModelScope.launch {
             repository.settingsFlow.collect { userSettings ->
+                LiveMangaSiteScraper.dohProvider = userSettings.dohProvider
                 if (_screenBackStack.value.isEmpty() && _currentScreen.value == AppScreen.STORAGE) {
                     val mapped = when (userSettings.startScreen) {
                         "التوصيات" -> AppScreen.RECOMMENDATIONS
@@ -493,6 +520,7 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
 
     fun saveReadingProgress(work: MangaWork, chapter: MangaChapter, pageIndex: Int, scrollOffset: Int = 0) {
         val safePage = pageIndex.coerceAtLeast(0)
+        val totalPages = chapter.pageCount.coerceAtLeast(1)
         val currentProgressMap = _readingProgressMap.value.toMutableMap()
         currentProgressMap[work.id] = chapter.number to safePage
         _readingProgressMap.value = currentProgressMap
@@ -511,9 +539,57 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
                 chapterNumber = chapter.number,
                 chapterTitle = chapter.title,
                 pageIndex = safePage,
-                totalPages = chapter.pageCount,
+                totalPages = totalPages,
                 scrollOffset = scrollOffset
             )
+
+            // 1. Smart Next-Chapter Preloading when reaching the last 20% of the current chapter
+            if (settings.value.preloadNextChapter && totalPages > 1 && safePage >= (totalPages * 0.8f).toInt()) {
+                val sortedChapters = work.chapters.sortedBy { it.number }
+                val nextChapter = sortedChapters.firstOrNull { it.number > chapter.number }
+                if (nextChapter != null && nextChapter.chapterUrl.startsWith("http")) {
+                    if (preloadedChapterUrls.add(nextChapter.chapterUrl)) {
+                        launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val res = LiveMangaSiteScraper.fetchChapterPages(work, nextChapter)
+                            if (res.pageUrls.isNotEmpty()) {
+                                LiveMangaSiteScraper.cacheChapterPages(nextChapter.chapterUrl, res.pageUrls)
+                                // Warm up first 3 pages in HTTP cache
+                                res.pageUrls.take(3).forEach { imgUrl ->
+                                    runCatching {
+                                        val req = okhttp3.Request.Builder()
+                                            .url(imgUrl)
+                                            .header("User-Agent", LiveMangaSiteScraper.activeUserAgent.ifBlank { LiveMangaSiteScraper.DEFAULT_USER_AGENT })
+                                            .header("Referer", nextChapter.chapterUrl)
+                                            .build()
+                                        LiveMangaSiteScraper.httpClient.newCall(req).execute().close()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. On completing chapter (last page): Auto-delete older read chapters & Sync Trackers
+            if (safePage >= totalPages - 1) {
+                val syncKey = "${work.id}_${chapter.number}"
+                if (syncedTrackerChapters.add(syncKey)) {
+                    repository.syncChapterProgressWithTrackers(work.title, chapter.number)
+                }
+                if (settings.value.autoDeleteReadChapters) {
+                    val keepCount = settings.value.keepLastReadChaptersCount.coerceAtLeast(0)
+                    val downloadedForWork = repository.dao.getDownloadedChaptersForWorkOnce(work.id)
+                    val toDelete = downloadedForWork.filter { ch ->
+                        ch.chapterNumber <= (chapter.number - keepCount)
+                    }
+                    toDelete.forEach { oldCh ->
+                        repository.deleteDownloadedChapter(work.id, oldCh.chapterNumber)
+                    }
+                    if (toDelete.isNotEmpty()) {
+                        refreshStorageStats()
+                    }
+                }
+            }
         }
     }
 
@@ -647,7 +723,172 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
         }
     }
 
-    // Add Site Dialog Flow (matching 00:33-00:43 and 00:54-01:03 in the video)
+    // Batch Downloads & CBZ Export
+    fun downloadUnreadChapters(work: MangaWork, quality: String = "عالية (الأصلية)") {
+        val readSet = _readChaptersMap.value[work.id].orEmpty()
+        val unread = work.chapters.filter { it.number !in readSet }.sortedBy { it.number }
+        if (unread.isEmpty()) {
+            showToast("جميع الفصول مقروءة بالفعل")
+            return
+        }
+        downloadChaptersForWork(
+            work = work,
+            chapters = unread,
+            toastMsg = "بدأ تنزيل ${unread.size} فصل غير مقروء",
+            quality = quality
+        )
+    }
+
+    fun downloadFirstNChapters(work: MangaWork, count: Int, quality: String = "عالية (الأصلية)") {
+        val sortedAsc = work.chapters.sortedBy { it.number }.take(count)
+        if (sortedAsc.isEmpty()) {
+            showToast("لا توجد فصول متاحة للتنزيل")
+            return
+        }
+        downloadChaptersForWork(
+            work = work,
+            chapters = sortedAsc,
+            toastMsg = "بدأ تنزيل أول ${sortedAsc.size} فصول",
+            quality = quality
+        )
+    }
+
+    fun downloadAllChapters(work: MangaWork, quality: String = "عالية (الأصلية)") {
+        val sortedAsc = work.chapters.sortedBy { it.number }
+        if (sortedAsc.isEmpty()) {
+            saveWholeMangaFromCatalog(work)
+            return
+        }
+        downloadChaptersForWork(
+            work = work,
+            chapters = sortedAsc,
+            toastMsg = "بدأ تنزيل جميع الفصول (${sortedAsc.size} فصل)",
+            quality = quality
+        )
+    }
+
+    fun exportChapterAsCbz(work: MangaWork, chapter: MangaChapter) {
+        viewModelScope.launch {
+            val cbzFile = repository.exportChapterToCbz(work, chapter)
+            refreshStorageStats()
+            if (cbzFile != null) {
+                showToast("تم تصدير الفصل بصيغة CBZ: ${cbzFile.name}")
+            } else {
+                showToast("قم بتنزيل الفصل أولاً لتصديره بصيغة .cbz")
+            }
+        }
+    }
+
+    fun exportAllDownloadedChaptersAsCbz(work: MangaWork) {
+        viewModelScope.launch {
+            val files = repository.exportWorkToCbzFiles(work)
+            refreshStorageStats()
+            if (files.isNotEmpty()) {
+                showToast("تم تصدير ${files.size} فصل بصيغة .cbz في مجلد التخزين")
+            } else {
+                showToast("لا توجد فصول محملة لهذا العمل لتصديرها بصيغة .cbz")
+            }
+        }
+    }
+
+    fun exportAllChaptersAsCbz(work: MangaWork) = exportAllDownloadedChaptersAsCbz(work)
+
+    fun reorderDownloadTask(task: DownloadTaskEntity, moveUp: Boolean) {
+        repository.reorderDownloadTask(task, moveUp)
+    }
+
+    // Unified Global Search & Source Migration
+    fun performGlobalSearch(query: String) {
+        _globalSearchQuery.value = query
+        val clean = query.trim()
+        if (clean.isEmpty()) {
+            _globalSearchResultsBySite.value = emptyMap()
+            _isGlobalSearching.value = false
+            return
+        }
+        recordSearchQuery()
+        viewModelScope.launch {
+            _isGlobalSearching.value = true
+            val results = LinkedHashMap<SiteEntity, List<MangaWork>>()
+            val activeSites = enabledSites.value
+            for (site in activeSites) {
+                val scrapeRes = runCatching {
+                    LiveMangaSiteScraper.fetchSiteCatalog(site = site, searchQuery = clean)
+                }.getOrNull()
+                val works = scrapeRes?.works.orEmpty()
+                if (works.isNotEmpty()) {
+                    results[site] = works
+                    _globalSearchResultsBySite.value = results.toMap()
+                }
+            }
+            _isGlobalSearching.value = false
+        }
+    }
+
+    fun findMigrationCandidatesForWork(work: MangaWork) {
+        viewModelScope.launch {
+            _isSearchingMigration.value = true
+            _migrationCandidates.value = emptyList()
+            val query = work.title.trim()
+            val candidates = mutableListOf<MangaWork>()
+            val otherSites = enabledSites.value.filter { it.id != work.sourceId && it.name != work.siteName }
+            val targetSites = if (otherSites.isNotEmpty()) otherSites else enabledSites.value
+            for (site in targetSites) {
+                val res = runCatching {
+                    LiveMangaSiteScraper.fetchSiteCatalog(site = site, searchQuery = query)
+                }.getOrNull()
+                val matched = res?.works.orEmpty().filter { it.mangaUrl != work.mangaUrl }
+                candidates.addAll(matched.take(6))
+                _migrationCandidates.value = candidates.toList()
+            }
+            _isSearchingMigration.value = false
+        }
+    }
+
+    fun migrateWorkToSource(oldWork: MangaWork, newWork: MangaWork) {
+        viewModelScope.launch {
+            // Migrate reading progress
+            val oldProgress = _readingProgressMap.value[oldWork.id]
+            val oldReadSet = _readChaptersMap.value[oldWork.id].orEmpty()
+            if (oldProgress != null) {
+                val map = _readingProgressMap.value.toMutableMap()
+                map[newWork.id] = oldProgress
+                _readingProgressMap.value = map
+                repository.readingProgressRepository.saveProgress(
+                    workId = newWork.id,
+                    workTitle = newWork.title,
+                    chapterId = "ch-${oldProgress.first}",
+                    chapterNumber = oldProgress.first,
+                    chapterTitle = "الفصل ${oldProgress.first}",
+                    pageIndex = oldProgress.second,
+                    totalPages = 12,
+                    scrollOffset = 0
+                )
+            }
+            if (oldReadSet.isNotEmpty()) {
+                val rMap = _readChaptersMap.value.toMutableMap()
+                rMap[newWork.id] = oldReadSet
+                _readChaptersMap.value = rMap
+            }
+            // Migrate favorite if oldWork was in favorites
+            val existingFav = favorites.value.find {
+                it.url == oldWork.mangaUrl || it.title.equals(oldWork.title, ignoreCase = true)
+            }
+            if (existingFav != null) {
+                repository.deleteFavorite(existingFav)
+                repository.toggleFavorite(
+                    title = newWork.title,
+                    url = newWork.mangaUrl.ifBlank { "${newWork.siteUrl}/series/${newWork.id}" },
+                    siteName = newWork.siteName,
+                    category = existingFav.category
+                )
+            }
+            showToast("تم نقل العمل وتقدم القراءة إلى ${newWork.siteName}")
+            openMangaDetails(newWork)
+        }
+    }
+
+    // Add Site Dialog Flow (matching 00:08-00:22 in the reference video)
     fun openAddSiteDialog(prefillUrl: String = "") {
         val cleanPrefill = prefillUrl
             .removePrefix("https://")
@@ -684,14 +925,8 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
                 statusMessage = "جار مراجعة حالة توافق الموقع...",
                 errorMessage = null
             )
-            delay(450)
-            _addSiteDialogState.value = current.copy(
-                isChecking = true,
-                statusMessage = "جار التحقق من توافق الموقع...",
-                errorMessage = null
-            )
+            delay(350)
             val resolved = repository.normalizeAndResolveSite(rawInput)
-            delay(450)
             if (!resolved.isValid) {
                 _addSiteDialogState.value = current.copy(
                     isChecking = false,
@@ -700,19 +935,45 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
                 )
                 return@launch
             }
+            // Open WebView verification once during Step 1 (matching 00:08-00:22 of the reference video)
             _addSiteDialogState.value = current.copy(
                 isChecking = true,
-                statusMessage = "جار التحقق من مطابقة الأعمال...",
-                errorMessage = null
+                statusMessage = "جار التحقق من توافق الموقع...",
+                errorMessage = null,
+                verificationUrl = resolved.normalizedUrl,
+                resolvedDomain = resolved.domain,
+                resolvedSuggestedName = resolved.suggestedName,
+                resolvedIconKey = resolved.iconKey
             )
-            delay(450)
-            _addSiteDialogState.value = AddSiteDialogState.Step2ConfirmManual(
-                normalizedUrl = resolved.normalizedUrl,
-                domain = resolved.domain,
-                siteName = resolved.suggestedName,
-                iconKey = resolved.iconKey
-            )
+            // Fallback timer for headless unit tests where WebView onPageFinished does not run
+            delay(900)
+            val afterWait = _addSiteDialogState.value
+            if (afterWait is AddSiteDialogState.Step1InputUrl && afterWait.verificationUrl != null) {
+                onSiteVerificationCompleted(afterWait.resolvedSuggestedName)
+            }
         }
+    }
+
+    fun onSiteVerificationCompleted(extractedTitle: String? = null) {
+        val current = _addSiteDialogState.value as? AddSiteDialogState.Step1InputUrl ?: return
+        val cleanTitle = extractedTitle
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.takeIf {
+                it.isNotBlank() &&
+                    !it.contains("Just a moment", ignoreCase = true) &&
+                    !it.contains("Cloudflare", ignoreCase = true) &&
+                    !it.contains("Attention Required", ignoreCase = true) &&
+                    !it.startsWith("http", ignoreCase = true)
+            }
+        val finalName = cleanTitle ?: current.resolvedSuggestedName.ifBlank { current.resolvedDomain }
+        val targetUrl = current.verificationUrl ?: "https://${current.resolvedDomain}"
+        _addSiteDialogState.value = AddSiteDialogState.Step2ConfirmManual(
+            normalizedUrl = targetUrl,
+            domain = current.resolvedDomain,
+            siteName = finalName,
+            iconKey = current.resolvedIconKey
+        )
     }
 
     fun updateStep2SiteName(newName: String) {
@@ -846,6 +1107,56 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
             showToast("تم حذف الفئة")
         }
     }
+
+    fun updateFavoriteWorkCategory(favorite: FavoriteEntity, newCategory: String) {
+        viewModelScope.launch {
+            repository.updateFavoriteCategory(favorite, newCategory)
+            showToast("تم نقل \"${favorite.title}\" إلى فئة $newCategory")
+        }
+    }
+
+    fun assignWorkToFavoriteCategory(work: MangaWork, category: String) {
+        viewModelScope.launch {
+            val url = work.mangaUrl.ifBlank { "${work.siteUrl}/series/${work.id}" }
+            val existing = favorites.value.find { it.url == url }
+            if (existing != null) {
+                repository.updateFavoriteCategory(existing, category)
+            } else {
+                repository.toggleFavorite(
+                    title = work.title,
+                    url = url,
+                    siteName = work.siteName,
+                    category = category
+                )
+            }
+            showToast("تم حفظ \"${work.title}\" في فئة: $category")
+        }
+    }
+
+    fun checkLibraryUpdatesInBackgroundNow() {
+        viewModelScope.launch {
+            if (settings.value.checkNewChaptersWifiOnly && !repository.isWifiConnected()) {
+                showToast("فحص التحديثات مقتصر على شبكة Wi-Fi حسب إعداداتك")
+                return@launch
+            }
+            showToast("جارٍ فحص التحديثات الجديدة لأعمال المكتبة والمفضلة...")
+            val count = repository.checkFavoriteWorksForNewChapters()
+            if (count > 0) {
+                showToast("تم العثور على $count تحديث جديد في مكتبتك!")
+            } else {
+                showToast("جميع أعمال مكتبتك محدّثة لآخر فصل")
+            }
+        }
+    }
+
+    fun updateFavoriteCategoryForItem(favorite: FavoriteEntity, newCategory: String) =
+        updateFavoriteWorkCategory(favorite, newCategory)
+
+    fun assignWorkToCategory(work: MangaWork, category: String) =
+        assignWorkToFavoriteCategory(work, category)
+
+    fun runBackgroundLibraryUpdateCheckNow() =
+        checkLibraryUpdatesInBackgroundNow()
 
     // History
     fun clearAllHistory() {

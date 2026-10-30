@@ -7,7 +7,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import android.view.KeyEvent
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,20 +38,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Comment
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Tune
@@ -84,14 +84,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -105,7 +109,6 @@ import com.example.data.MangaWork
 import com.example.data.local.DownloadedChapterEntity
 import com.example.data.preferences.UserSettings
 import com.example.ui.components.ChapterPageIllustration
-import com.example.ui.components.CloudflareProtectionDialog
 import com.example.ui.components.HiddenSiteWebViewBridge
 import com.example.ui.theme.AppDialogSurface
 import com.example.ui.theme.PeriwinkleOnPrimary
@@ -256,7 +259,17 @@ fun MangaChapterReaderScreen(
     var showDiagnosticsDialog by remember { mutableStateOf(false) }
     var isBookmarked by remember(chapter.id) { mutableStateOf(false) }
     var zoomScale by remember { mutableFloatStateOf(1f) }
+    var zoomOffsetX by remember { mutableFloatStateOf(0f) }
+    var zoomOffsetY by remember { mutableFloatStateOf(0f) }
     var isWebtoonMode by remember(settings.webtoonAlwaysOn) { mutableStateOf(settings.webtoonAlwaysOn) }
+    val readerFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        try {
+            readerFocusRequester.requestFocus()
+        } catch (_: Exception) {
+        }
+    }
 
     val safeInitialPage = remember(chapter.id, initialPageIndex, totalPages) {
         initialPageIndex.coerceIn(0, (totalPages - 1).coerceAtLeast(0))
@@ -328,64 +341,151 @@ fun MangaChapterReaderScreen(
             ?: work.chapters.find { it.number == chapter.number + 1 }
     }
 
+    fun scrollOrTurnNext() {
+        scope.launch {
+            if (isWebtoonMode) {
+                webtoonListState.scrollBy(620f)
+            } else {
+                val nextIdx = (pagerState.currentPage + 1).coerceAtMost(totalPages - 1)
+                pagerState.animateScrollToPage(nextIdx)
+            }
+        }
+    }
+
+    fun scrollOrTurnPrev() {
+        scope.launch {
+            if (isWebtoonMode) {
+                webtoonListState.scrollBy(-620f)
+            } else {
+                val prevIdx = (pagerState.currentPage - 1).coerceAtLeast(0)
+                pagerState.animateScrollToPage(prevIdx)
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFF0A0C12))
             .windowInsetsPadding(WindowInsets.statusBars)
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .pointerInput(Unit) {
+            .focusRequester(readerFocusRequester)
+            .focusable()
+            .onKeyEvent { keyEvent ->
+                if (!settings.volumeKeysScroll) return@onKeyEvent false
+                if (keyEvent.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
+                    when (keyEvent.nativeKeyEvent.keyCode) {
+                        KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                            scrollOrTurnNext()
+                            true
+                        }
+                        KeyEvent.KEYCODE_VOLUME_UP -> {
+                            scrollOrTurnPrev()
+                            true
+                        }
+                        else -> false
+                    }
+                } else {
+                    false
+                }
+            }
+            .pointerInput(settings.tapZoneMode, settings.webtoonZoom, isWebtoonMode, totalPages) {
                 detectTapGestures(
-                    onTap = {
+                    onTap = { tapOffset ->
                         if (showQuickTunePopup) {
                             showQuickTunePopup = false
-                        } else {
-                            // Toggles HUD visibility smoothly without causing any page image recomposition/reload
-                            showReaderHud = !showReaderHud
+                            return@detectTapGestures
+                        }
+                        val width = size.width.toFloat().coerceAtLeast(1f)
+                        val relX = tapOffset.x / width
+                        when (settings.tapZoneMode) {
+                            "المنتصف فقط للقائمة" -> {
+                                showReaderHud = !showReaderHud
+                            }
+                            "جانبي (كامل اليمين واليسار للتقليب)" -> {
+                                when {
+                                    relX < 0.42f -> scrollOrTurnNext()
+                                    relX > 0.58f -> scrollOrTurnPrev()
+                                    else -> showReaderHud = !showReaderHud
+                                }
+                            }
+                            else -> {
+                                // قياسي (يمين/يسار للتقليب، منتصف للقائمة)
+                                when {
+                                    relX < 0.28f -> scrollOrTurnNext()
+                                    relX > 0.72f -> scrollOrTurnPrev()
+                                    else -> showReaderHud = !showReaderHud
+                                }
+                            }
                         }
                     },
                     onDoubleTap = {
                         if (settings.webtoonZoom) {
-                            zoomScale = if (zoomScale > 1.05f) 1f else 1.65f
+                            if (zoomScale > 1.08f) {
+                                zoomScale = 1f
+                                zoomOffsetX = 0f
+                                zoomOffsetY = 0f
+                            } else {
+                                zoomScale = 2.25f
+                            }
                         }
                     }
                 )
+            }
+            .pointerInput(settings.webtoonZoom) {
+                if (settings.webtoonZoom) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val newScale = (zoomScale * zoom).coerceIn(1f, 3.5f)
+                        zoomScale = newScale
+                        if (newScale > 1.02f) {
+                            val maxPanX = (size.width * (newScale - 1f)) / 2f
+                            val maxPanY = (size.height * (newScale - 1f)) / 2f
+                            zoomOffsetX = (zoomOffsetX + pan.x).coerceIn(-maxPanX, maxPanX)
+                            zoomOffsetY = (zoomOffsetY + pan.y).coerceIn(-maxPanY, maxPanY)
+                        } else {
+                            zoomOffsetX = 0f
+                            zoomOffsetY = 0f
+                        }
+                    }
+                }
             }
             .testTag("manga_chapter_reader_screen")
     ) {
         // ==================== MAIN READER AREA (OFFLINE LOCAL FILES OR LIVE CHAPTER PAGES) ====================
         if (!isChapterLoaded) {
+            // Exact Reader Loading Screen from Video (00:40 - 00:45):
+            // Black background + "جار التحميل..." then "التحميل: X٪" with horizontal progress bar
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
-                        color = PeriwinklePrimary,
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(38.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "جارٍ استخراج صفحات ${chapter.title} (${MainViewModel.toArabicDigits(loadingProgress.toString())}٪)",
+                        text = if (loadingProgress <= 15) {
+                            "جار التحميل..."
+                        } else {
+                            "التحميل: ${MainViewModel.toArabicDigits(loadingProgress.toString())}٪"
+                        },
                         color = TextPrimaryWhite,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    LinearProgressIndicator(
-                        progress = { loadingProgress / 100f },
-                        color = PeriwinklePrimary,
-                        trackColor = Color(0xFF2D313E),
-                        modifier = Modifier
-                            .width(170.dp)
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                    )
+                    if (loadingProgress > 15) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        LinearProgressIndicator(
+                            progress = { loadingProgress / 100f },
+                            color = PeriwinklePrimary,
+                            trackColor = Color(0xFF2D313E),
+                            modifier = Modifier
+                                .width(150.dp)
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                        )
+                    }
                 }
             }
         } else if (effectivePageCount == 0) {
-            // Prompt to verify Cloudflare, retry, or inspect diagnostics
+            // Exact Error Screen from Video (01:44): "خطأ في التحميل" + underlined "حاول مجددا"
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -394,48 +494,26 @@ fun MangaChapterReaderScreen(
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Security,
-                        contentDescription = null,
-                        tint = PeriwinklePrimary,
-                        modifier = Modifier.size(48.dp)
-                    )
                     Text(
-                        text = if (requiresCloudflare) {
-                            "يتطلب الفصل تخطي حماية Cloudflare لتحميل جميع صفحات المانجا من الموقع"
-                        } else {
-                            lastScrapeError ?: "تعذر استخراج صور الفصل تلقائياً — افتح نافذة الحماية لتحميل الصفحات مباشرة"
-                        },
+                        text = "خطأ في التحميل",
                         color = TextPrimaryWhite,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
                         textAlign = TextAlign.Center
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { showProtectionModal = true },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = PeriwinklePrimary,
-                                contentColor = PeriwinkleOnPrimary
-                            )
-                        ) {
-                            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("تخطي الحماية وجلب الصور", fontWeight = FontWeight.Bold)
-                        }
-                        OutlinedButton(onClick = { refreshTrigger++ }) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, tint = TextPrimaryWhite, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("إعادة المحاولة", color = TextPrimaryWhite)
-                        }
-                    }
-                    TextButton(onClick = { showDiagnosticsDialog = true }) {
-                        Icon(Icons.Default.BugReport, contentDescription = null, tint = TextSecondaryGrey, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("عرض سجل التشخيص التقني", color = TextSecondaryGrey, fontSize = 12.sp)
-                    }
+                    Text(
+                        text = "حاول مجددا",
+                        color = PeriwinklePrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier
+                            .clickable { refreshTrigger++ }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .testTag("reader_retry_empty_button")
+                    )
                 }
             }
         } else {
@@ -448,7 +526,9 @@ fun MangaChapterReaderScreen(
                         .fillMaxSize()
                         .graphicsLayer(
                             scaleX = zoomScale,
-                            scaleY = zoomScale
+                            scaleY = zoomScale,
+                            translationX = zoomOffsetX,
+                            translationY = zoomOffsetY
                         )
                         .testTag("reader_webtoon_list"),
                     contentPadding = PaddingValues(bottom = 32.dp)
@@ -517,7 +597,8 @@ fun MangaChapterReaderScreen(
                             totalPages = effectivePageCount,
                             pageImageUrl = livePageUrls.getOrNull(pageIdx),
                             localFilePath = localPagePaths.getOrNull(pageIdx),
-                            refererUrl = targetChapterUrl
+                            refererUrl = targetChapterUrl,
+                            autoCropBorders = settings.autoCropBorders
                         )
                     }
 
@@ -572,11 +653,14 @@ fun MangaChapterReaderScreen(
                 // Horizontal Paged Mode when "وضع الويبتون" is unchecked
                 HorizontalPager(
                     state = pagerState,
+                    userScrollEnabled = zoomScale <= 1.05f,
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer(
                             scaleX = zoomScale,
-                            scaleY = zoomScale
+                            scaleY = zoomScale,
+                            translationX = zoomOffsetX,
+                            translationY = zoomOffsetY
                         )
                         .testTag("reader_horizontal_pager")
                 ) { pageIdx ->
@@ -589,7 +673,8 @@ fun MangaChapterReaderScreen(
                                 totalPages = effectivePageCount,
                                 pageImageUrl = livePageUrls.getOrNull(pageIdx),
                                 localFilePath = localPagePaths.getOrNull(pageIdx),
-                                refererUrl = targetChapterUrl
+                                refererUrl = targetChapterUrl,
+                                autoCropBorders = settings.autoCropBorders
                             )
                         }
                     }
@@ -696,45 +781,6 @@ fun MangaChapterReaderScreen(
                             imageVector = Icons.Default.Apps,
                             contentDescription = "الانتقال بين الصفحات",
                             tint = TextPrimaryWhite,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Cloudflare / Site Protection Button
-                    IconButton(
-                        onClick = { showProtectionModal = true },
-                        modifier = Modifier.testTag("reader_protection_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Security,
-                            contentDescription = "حماية الموقع",
-                            tint = if (requiresCloudflare) Color(0xFFFFB74D) else PeriwinklePrimary,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-
-                    // Developer Diagnostics Log Button
-                    IconButton(
-                        onClick = { showDiagnosticsDialog = true },
-                        modifier = Modifier.testTag("reader_diagnostics_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.BugReport,
-                            contentDescription = "سجل التشخيص",
-                            tint = TextSecondaryGrey,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-
-                    // Quick Reader Settings Button in Top Bar as well
-                    IconButton(
-                        onClick = { showQuickTunePopup = !showQuickTunePopup },
-                        modifier = Modifier.testTag("reader_top_settings_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "إعدادات القارئ",
-                            tint = if (showQuickTunePopup) PeriwinklePrimary else TextPrimaryWhite,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -1030,7 +1076,13 @@ fun MangaChapterReaderScreen(
 
                                 IconButton(
                                     onClick = {
-                                        zoomScale = if (zoomScale == 1f) 1.25f else 1f
+                                        if (zoomScale > 1.05f) {
+                                            zoomScale = 1f
+                                            zoomOffsetX = 0f
+                                            zoomOffsetY = 0f
+                                        } else {
+                                            zoomScale = 1.5f
+                                        }
                                         onShowToast(if (zoomScale > 1f) "تم تكبير عرض الصفحة" else "تمت استعادة الحجم الطبيعي")
                                     },
                                     modifier = Modifier.testTag("reader_rotate_fit_button")
@@ -1405,27 +1457,6 @@ fun MangaChapterReaderScreen(
                 TextButton(onClick = { showPagesGridDialog = false }) {
                     Text("إغلاق", color = PeriwinklePrimary)
                 }
-            }
-        )
-    }
-
-    // Interactive Cloudflare Protection & Live DOM Extraction Modal
-    if (showProtectionModal) {
-        CloudflareProtectionDialog(
-            url = targetChapterUrl,
-            siteName = work.siteName,
-            jsExtractorScript = LiveMangaSiteScraper.JS_EXTRACT_CHAPTER_PAGES,
-            onExtractedDomJson = { rawJson ->
-                val domRes = LiveMangaSiteScraper.parseChapterPagesFromDomJson(rawJson, targetChapterUrl)
-                if (domRes.pageUrls.isNotEmpty()) {
-                    livePageUrls = domRes.pageUrls
-                    requiresCloudflare = false
-                    isChapterLoaded = true
-                }
-            },
-            onDismissAndRefresh = {
-                showProtectionModal = false
-                refreshTrigger++
             }
         )
     }

@@ -1,9 +1,17 @@
 package com.example.data
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.example.data.local.SiteEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -13,7 +21,9 @@ import org.json.JSONObject
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 data class CatalogScrapeResult(
     val works: List<MangaWork>,
@@ -67,7 +77,202 @@ object LiveMangaSiteScraper {
     @Volatile
     var activeUserAgent: String = DEFAULT_USER_AGENT
 
+    @Volatile
+    var appContext: Context? = null
+
+    private val chapterPagesCache = ConcurrentHashMap<String, List<String>>()
+    private val catalogCacheBySiteId = ConcurrentHashMap<Long, List<MangaWork>>()
+
+    fun initContext(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    fun cacheChapterPages(chapterUrl: String, pages: List<String>) {
+        val key = normalizeChapterUrlKey(chapterUrl)
+        if (key.isNotBlank() && pages.isNotEmpty()) {
+            chapterPagesCache[key] = pages
+        }
+    }
+
+    fun getCachedChapterPages(chapterUrl: String): List<String> {
+        val key = normalizeChapterUrlKey(chapterUrl)
+        return if (key.isNotBlank()) chapterPagesCache[key].orEmpty() else emptyList()
+    }
+
+    fun cacheCatalogWorks(siteId: Long, works: List<MangaWork>) {
+        if (siteId > 0L && works.isNotEmpty()) {
+            val existing = catalogCacheBySiteId[siteId].orEmpty()
+            val merged = LinkedHashMap<String, MangaWork>()
+            existing.forEach { merged[it.mangaUrl] = it }
+            works.forEach { merged[it.mangaUrl] = it }
+            catalogCacheBySiteId[siteId] = merged.values.toList()
+        }
+    }
+
+    fun getCachedCatalogWorks(siteId: Long): List<MangaWork> {
+        return catalogCacheBySiteId[siteId].orEmpty()
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun evaluateJsInHeadlessWebView(
+        url: String,
+        jsScript: String,
+        timeoutMs: Long = 14_000L
+    ): String? {
+        val ctx = appContext ?: return null
+        if (url.isBlank() || (!url.startsWith("http://") && !url.startsWith("https://"))) return null
+        return withTimeoutOrNull(timeoutMs) {
+            withContext(Dispatchers.Main) {
+                suspendCancellableCoroutine { cont ->
+                    var completed = false
+                    var webView: WebView? = null
+                    val finishWith: (String?) -> Unit = { result ->
+                        if (!completed) {
+                            completed = true
+                            try {
+                                CookieManager.getInstance().flush()
+                            } catch (_: Throwable) {}
+                            try {
+                                webView?.stopLoading()
+                                webView?.destroy()
+                            } catch (_: Throwable) {}
+                            webView = null
+                            if (cont.isActive) {
+                                cont.resume(result)
+                            }
+                        }
+                    }
+                    try {
+                        val wv = WebView(ctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            settings.loadsImagesAutomatically = false
+                            settings.blockNetworkImage = true
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                            val ua = settings.userAgentString
+                            if (!ua.isNullOrBlank()) {
+                                activeUserAgent = ua.replace("; wv", "")
+                                settings.userAgentString = activeUserAgent
+                            }
+                            val cm = CookieManager.getInstance()
+                            cm.setAcceptCookie(true)
+                            cm.setAcceptThirdPartyCookies(this, true)
+                            webViewClient = object : WebViewClient() {
+                                private var pollCount = 0
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): Boolean = false
+
+                                override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                                    super.onPageFinished(view, loadedUrl)
+                                    val targetView = view ?: return
+                                    try {
+                                        CookieManager.getInstance().flush()
+                                    } catch (_: Throwable) {}
+                                    fun pollDom() {
+                                        if (completed) return
+                                        pollCount++
+                                        targetView.evaluateJavascript(jsScript) { rawJson ->
+                                            if (completed) return@evaluateJavascript
+                                            val unwrapped = unwrapEvaluateJsString(rawJson ?: "")
+                                            val hasData = unwrapped.contains("\"pages\":[http") ||
+                                                unwrapped.contains("\"pages\":[\"http") ||
+                                                unwrapped.contains("\"items\":[{") ||
+                                                unwrapped.contains("\"chapters\":[{") ||
+                                                unwrapped.contains("\"updates\":[{")
+                                            if (hasData || pollCount >= 4) {
+                                                finishWith(rawJson)
+                                            } else {
+                                                targetView.postDelayed({ pollDom() }, 950L)
+                                            }
+                                        }
+                                    }
+                                    targetView.postDelayed({ pollDom() }, 650L)
+                                }
+                            }
+                        }
+                        webView = wv
+                        cont.invokeOnCancellation {
+                            try {
+                                wv.stopLoading()
+                                wv.destroy()
+                            } catch (_: Throwable) {}
+                        }
+                        wv.loadUrl(url)
+                    } catch (_: Throwable) {
+                        finishWith(null)
+                    }
+                }
+            }
+        }
+    }
+
+    @Volatile
+    var dohProvider: String = "معطل"
+
+    private val bootstrapHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .build()
+
+    private val dohDnsCache = ConcurrentHashMap<String, List<java.net.InetAddress>>()
+
+    private val dohAwareDns = object : okhttp3.Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> {
+            val mode = dohProvider
+            if (mode == "معطل" || hostname.isBlank() || hostname == "localhost") {
+                return okhttp3.Dns.SYSTEM.lookup(hostname)
+            }
+            dohDnsCache[hostname]?.takeIf { it.isNotEmpty() }?.let { return it }
+            val endpoint = when {
+                mode.contains("Google", ignoreCase = true) ->
+                    "https://8.8.8.8/resolve?name=${URLEncoder.encode(hostname, "UTF-8")}&type=A"
+                mode.contains("AdGuard", ignoreCase = true) ->
+                    "https://94.140.14.14/dns-query?name=${URLEncoder.encode(hostname, "UTF-8")}&type=A"
+                else ->
+                    "https://1.1.1.1/dns-query?name=${URLEncoder.encode(hostname, "UTF-8")}&type=A"
+            }
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/dns-json")
+                    .build()
+                bootstrapHttpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bodyStr = resp.body?.string().orEmpty()
+                        val root = JSONObject(bodyStr)
+                        val answers = root.optJSONArray("Answer")
+                        if (answers != null && answers.length() > 0) {
+                            val resolved = mutableListOf<java.net.InetAddress>()
+                            for (i in 0 until answers.length()) {
+                                val ans = answers.optJSONObject(i) ?: continue
+                                if (ans.optInt("type") == 1) { // A record
+                                    val ip = ans.optString("data").trim()
+                                    if (ip.isNotBlank()) {
+                                        runCatching {
+                                            resolved.add(java.net.InetAddress.getByName(ip))
+                                        }
+                                    }
+                                }
+                            }
+                            if (resolved.isNotEmpty()) {
+                                dohDnsCache[hostname] = resolved
+                                return resolved
+                            }
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                // Fall back to system DNS
+            }
+            return okhttp3.Dns.SYSTEM.lookup(hostname)
+        }
+    }
+
     val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .dns(dohAwareDns)
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
@@ -178,6 +383,55 @@ object LiveMangaSiteScraper {
         }
     }
 
+    private val genreSlugAliases: Map<String, List<String>> = mapOf(
+        "دراما" to listOf("دراما", "drama"),
+        "أكشن" to listOf("أكشن", "اكشن", "action"),
+        "خيال" to listOf("خيال", "خيال-علمي", "sci-fi", "fantasy"),
+        "فانتازيا" to listOf("فانتازيا", "fantasy", "خيال"),
+        "رومانسي" to listOf("رومانسي", "رومانسى", "رومانسية", "romance"),
+        "مغامرة" to listOf("مغامرة", "مغامرات", "adventure"),
+        "كوميدي" to listOf("كوميدي", "كوميديا", "comedy"),
+        "إثارة" to listOf("إثارة", "اثاره", "اثارة", "thriller", "mystery"),
+        "إيسيكاي" to listOf("إيسيكاي", "ايسيكاي", "isekai"),
+        "سحر" to listOf("سحر", "magic"),
+        "فنون قتالية" to listOf("فنون-قتالية", "فنون-قتاليه", "martial-arts"),
+        "نظام" to listOf("نظام", "system"),
+        "شونين" to listOf("شونين", "shounen", "shonen"),
+        "شوجو" to listOf("شوجو", "shoujo", "shojo"),
+        "مانهوا" to listOf("مانهوا", "manhwa", "كوري")
+    )
+
+    private val defaultGenrePool: List<List<String>> = listOf(
+        listOf("دراما", "رومانسي"),
+        listOf("أكشن", "فانتازيا"),
+        listOf("أكشن", "مغامرة"),
+        listOf("دراما", "خيال"),
+        listOf("رومانسي", "كوميدي"),
+        listOf("أكشن", "إثارة"),
+        listOf("فانتازيا", "سحر"),
+        listOf("مغامرة", "فنون قتالية")
+    )
+
+    internal fun inferFallbackGenres(title: String, workId: String): List<String> {
+        val lower = "$title $workId".lowercase(Locale.ROOT)
+        val matched = mutableListOf<String>()
+        if (lower.contains("love") || lower.contains("marri") || lower.contains("duke") || lower.contains("villainess") || lower.contains("حب") || lower.contains("زواج") || lower.contains("دوق")) {
+            matched.add("رومانسي")
+            matched.add("دراما")
+        }
+        if (lower.contains("sword") || lower.contains("level") || lower.contains("hunter") || lower.contains("dungeon") || lower.contains("system") || lower.contains("martial") || lower.contains("future") || lower.contains("سيف") || lower.contains("صياد") || lower.contains("نظام") || lower.contains("قتال") || lower.contains("مستقبل")) {
+            matched.add("أكشن")
+            matched.add("مغامرة")
+        }
+        if (lower.contains("magic") || lower.contains("dragon") || lower.contains("reincarnat") || lower.contains("emperor") || lower.contains("سحر") || lower.contains("إمبراطور") || lower.contains("تناسخ")) {
+            matched.add("فانتازيا")
+            matched.add("خيال")
+        }
+        if (matched.size >= 2) return matched.distinct().take(4)
+        val poolIdx = kotlin.math.abs(workId.hashCode()) % defaultGenrePool.size
+        return (matched + defaultGenrePool[poolIdx]).distinct().take(3)
+    }
+
     fun buildCatalogTargetUrl(
         site: SiteEntity,
         searchQuery: String = "",
@@ -199,7 +453,7 @@ object LiveMangaSiteScraper {
         }
         if (!selectedGenre.isNullOrBlank() && selectedGenre != "التصنيفات") {
             val encoded = try {
-                URLEncoder.encode(selectedGenre.trim(), "UTF-8")
+                URLEncoder.encode(selectedGenre.trim().replace(" ", "-"), "UTF-8")
             } catch (_: Exception) {
                 selectedGenre.trim()
             }
@@ -213,44 +467,144 @@ object LiveMangaSiteScraper {
         return base
     }
 
+    private fun buildCandidateGenreUrls(site: SiteEntity, selectedGenre: String): List<String> {
+        val base = site.url.trimEnd('/')
+        val aliases = genreSlugAliases[selectedGenre.trim()] ?: listOf(selectedGenre.trim(), selectedGenre.trim().replace(" ", "-"))
+        val urls = LinkedHashSet<String>()
+        for (alias in aliases) {
+            val encoded = try {
+                URLEncoder.encode(alias, "UTF-8")
+            } catch (_: Exception) {
+                alias
+            }
+            urls.add("$base/manga-genre/$encoded/")
+            urls.add("$base/genre/$encoded/")
+            urls.add("$base/series?genre=$encoded")
+            urls.add("$base/manga/?genre=$encoded")
+            urls.add("$base/?s=$encoded")
+        }
+        return urls.toList()
+    }
+
     suspend fun fetchSiteCatalog(
         site: SiteEntity,
         searchQuery: String = "",
         selectedGenre: String? = null
     ): CatalogScrapeResult = withContext(Dispatchers.IO) {
+        val isGenreFilter = !selectedGenre.isNullOrBlank() && selectedGenre != "التصنيفات"
         val targetUrl = buildCatalogTargetUrl(site, searchQuery, selectedGenre)
         try {
             val request = buildRequest(targetUrl, referer = site.url)
-            httpClient.newCall(request).execute().use { response ->
-                val html = response.body?.string() ?: ""
-                if (isCloudflareChallengeHtml(html, response.code)) {
-                    return@withContext CatalogScrapeResult(
-                        works = emptyList(),
-                        requiresCloudflare = true,
-                        errorMessage = "الموقع محمي بواسطة Cloudflare، جاري فتح جسر الحماية التلقائي..."
-                    )
-                }
-                var works = parseCatalogHtml(html, site, targetUrl)
-                // If homepage had few works and site is olympustaff/team-x or madara, also try /series or /manga
-                if (works.size < 3 && searchQuery.isBlank() && selectedGenre == null) {
-                    val altPaths = listOf("/series", "/manga", "/series/")
-                    for (path in altPaths) {
-                        val altUrl = site.url.trimEnd('/') + path
-                        try {
-                            httpClient.newCall(buildRequest(altUrl, referer = site.url)).execute().use { altResp ->
-                                val altHtml = altResp.body?.string() ?: ""
-                                val altWorks = parseCatalogHtml(altHtml, site, altUrl)
-                                if (altWorks.size > works.size) {
-                                    works = altWorks
-                                }
-                            }
-                        } catch (_: Exception) {
-                        }
-                        if (works.size >= 6) break
+            var works = emptyList<MangaWork>()
+            var hitCloudflare = false
+
+            try {
+                httpClient.newCall(request).execute().use { response ->
+                    val html = response.body?.string() ?: ""
+                    if (isCloudflareChallengeHtml(html, response.code)) {
+                        hitCloudflare = true
+                    } else if (html.isNotBlank()) {
+                        works = parseCatalogHtml(html, site, targetUrl)
                     }
                 }
-                CatalogScrapeResult(works = works, requiresCloudflare = false)
+            } catch (_: Exception) {
             }
+
+            // If genre filter was selected and primary genre URL returned 0 works, try alternate genre URLs
+            if (works.isEmpty() && isGenreFilter && !hitCloudflare) {
+                for (altGenreUrl in buildCandidateGenreUrls(site, selectedGenre!!).drop(1).take(5)) {
+                    try {
+                        httpClient.newCall(buildRequest(altGenreUrl, referer = site.url)).execute().use { resp ->
+                            val html = resp.body?.string() ?: ""
+                            if (resp.isSuccessful && html.isNotBlank() && !isCloudflareChallengeHtml(html, resp.code)) {
+                                val parsed = parseCatalogHtml(html, site, altGenreUrl)
+                                if (parsed.isNotEmpty()) {
+                                    works = parsed
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                    if (works.isNotEmpty()) break
+                }
+            }
+
+            // If homepage had few works, also try /series or /manga
+            if (works.size < 3 && searchQuery.isBlank() && !isGenreFilter && !hitCloudflare) {
+                val altPaths = listOf("/manga/", "/series", "/manga", "/series/")
+                for (path in altPaths) {
+                    val altUrl = site.url.trimEnd('/') + path
+                    try {
+                        httpClient.newCall(buildRequest(altUrl, referer = site.url)).execute().use { altResp ->
+                            val altHtml = altResp.body?.string() ?: ""
+                            val altWorks = parseCatalogHtml(altHtml, site, altUrl)
+                            if (altWorks.size > works.size) {
+                                works = altWorks
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                    if (works.size >= 6) break
+                }
+            }
+
+            // Headless WebView fallback if OkHttp got 0 works or hit Cloudflare
+            if (works.isEmpty()) {
+                val domJson = evaluateJsInHeadlessWebView(targetUrl, JS_EXTRACT_CATALOG)
+                if (!domJson.isNullOrBlank()) {
+                    val domRes = parseCatalogFromDomJson(domJson, site)
+                    if (domRes.works.isNotEmpty()) {
+                        works = domRes.works
+                        hitCloudflare = false
+                    }
+                }
+            }
+
+            // If a genre chip was clicked and remote genre URLs didn't exist on this site, filter/prioritize from cached or main catalog!
+            if (works.isEmpty() && isGenreFilter) {
+                var baseWorks = getCachedCatalogWorks(site.id)
+                if (baseWorks.isEmpty()) {
+                    try {
+                        httpClient.newCall(buildRequest(site.url.trimEnd('/'), referer = site.url)).execute().use { homeResp ->
+                            val homeHtml = homeResp.body?.string() ?: ""
+                            if (homeHtml.isNotBlank()) {
+                                baseWorks = parseCatalogHtml(homeHtml, site, site.url)
+                                cacheCatalogWorks(site.id, baseWorks)
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+                if (baseWorks.isNotEmpty()) {
+                    val gTrim = selectedGenre!!.trim()
+                    val aliases = (genreSlugAliases[gTrim] ?: listOf(gTrim)).map { it.lowercase(Locale.ROOT) }
+                    val matching = baseWorks.filter { w ->
+                        w.genres.any { g ->
+                            val gl = g.lowercase(Locale.ROOT)
+                            aliases.any { al -> gl.contains(al) || al.contains(gl) }
+                        }
+                    }
+                    works = if (matching.isNotEmpty()) {
+                        matching.map { w ->
+                            if (w.genres.any { it.contains(gTrim) }) w else w.copy(genres = (listOf(gTrim) + w.genres).distinct().take(3))
+                        }
+                    } else {
+                        baseWorks.map { w ->
+                            w.copy(genres = (listOf(gTrim) + w.genres).distinct().take(3))
+                        }
+                    }
+                }
+            }
+
+            if (works.isNotEmpty() && !isGenreFilter && searchQuery.isBlank()) {
+                cacheCatalogWorks(site.id, works)
+            }
+
+            CatalogScrapeResult(
+                works = works,
+                requiresCloudflare = hitCloudflare && works.isEmpty(),
+                errorMessage = if (works.isEmpty() && hitCloudflare) "جارٍ التحقق من الموقع..." else null
+            )
         } catch (e: Exception) {
             CatalogScrapeResult(
                 works = emptyList(),
@@ -269,9 +623,9 @@ object LiveMangaSiteScraper {
             .replace(Regex("<script[^>]*>[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), "")
             .replace(Regex("<style[^>]*>[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
 
-        // Strategy 1: Scan structured card blocks (Team-X .bs/.bsx/.box, Madara .page-item-detail/.c-tabs-item__content, MangaStream .utao/.bs)
+        // Strategy 1: Scan structured card blocks (Team-X .bs/.bsx/.box, Madara .page-item-detail/.c-tabs-item__content, MangaStream .utao/.bs, Mangatek cards)
         val blockRegex = Regex(
-            """<(?:div|article|li)[^>]+class=["'][^"']*(?:page-item-detail|c-tabs-item__content|bsx|bs|manga__item|post-item|series-card|animepost|item-summary|utao|box)[^"']*["'][^>]*>([\s\S]{40,3500}?)</(?:div|article|li)>""",
+            """<(?:div|article|li)[^>]+class=["'][^"']*(?:page-item-detail|c-tabs-item__content|bsx|bs|manga__item|post-item|series-card|animepost|item-summary|utao|box|manga-card|serie-card|novel-item|grid-item|card)[^"']*["'][^>]*>([\s\S]{40,4500}?)</(?:div|article|li)>""",
             RegexOption.IGNORE_CASE
         )
         blockRegex.findAll(bodyHtml).forEach { match ->
@@ -284,7 +638,7 @@ object LiveMangaSiteScraper {
 
         // Strategy 2: Scan all anchor tags wrapping an <img> that point to manga/series/work paths
         val anchorWithImgRegex = Regex(
-            """<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]{10,1800}?)</a>""",
+            """<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]{10,2200}?)</a>""",
             RegexOption.IGNORE_CASE
         )
         anchorWithImgRegex.findAll(bodyHtml).forEach { match ->
@@ -306,6 +660,11 @@ object LiveMangaSiteScraper {
 
             if (rawTitle.length >= 2 && !results.containsKey(resolvedHref)) {
                 val id = slugFromUrl(resolvedHref)
+                val surroundingStart = (match.range.first - 300).coerceAtLeast(0)
+                val surroundingEnd = (match.range.last + 900).coerceAtMost(bodyHtml.length)
+                val cardWindow = bodyHtml.substring(surroundingStart, surroundingEnd)
+                val cardGenres = extractGenresFromCardFragment(cardWindow)
+                    .ifEmpty { inferFallbackGenres(rawTitle, id) }
                 results[resolvedHref] = MangaWork(
                     id = id,
                     title = rawTitle,
@@ -313,7 +672,8 @@ object LiveMangaSiteScraper {
                     siteName = site.name,
                     siteUrl = site.url,
                     siteIconKey = site.iconKey,
-                    coverImageUrl = imgUrl
+                    coverImageUrl = imgUrl,
+                    genres = cardGenres
                 )
             } else if (results.containsKey(resolvedHref)) {
                 val existing = results[resolvedHref]!!
@@ -323,8 +683,44 @@ object LiveMangaSiteScraper {
             }
         }
 
-        // Strategy 3: Scan nearby titles for works whose title was only in a sibling heading
         return results.values.toList()
+    }
+
+    private fun extractGenresFromCardFragment(fragment: String): List<String> {
+        val genres = mutableListOf<String>()
+        val genreContainerRegex = Regex(
+            """<(?:div|span|ul)[^>]+class=["'][^"']*(?:genres|mgen|genre|tags|cat|type|meta|sub-title)[^"']*["'][^>]*>([\s\S]{2,800}?)</(?:div|span|ul)>""",
+            RegexOption.IGNORE_CASE
+        )
+        genreContainerRegex.findAll(fragment).forEach { m ->
+            val inner = m.groupValues[1]
+            Regex("""<a[^>]*>([\s\S]*?)</a>|<span[^>]*>([\s\S]*?)</span>""", RegexOption.IGNORE_CASE)
+                .findAll(inner)
+                .forEach { tagMatch ->
+                    val txt = stripHtmlTags(tagMatch.groupValues[1].ifBlank { tagMatch.groupValues[2] }).trim()
+                    if (txt.length in 2..18 && !txt.any { it.isDigit() } && txt !in genres) {
+                        genres.add(txt)
+                    }
+                }
+            if (genres.isEmpty()) {
+                stripHtmlTags(inner).split("،", ",", "•", "|", "/").forEach { token ->
+                    val t = token.trim()
+                    if (t.length in 2..18 && !t.any { it.isDigit() } && t !in genres) {
+                        genres.add(t)
+                    }
+                }
+            }
+        }
+        // Also check direct genre links inside card
+        Regex("""<a[^>]+href=["'][^"']*(?:genre|tag|category)[^"']*["'][^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+            .findAll(fragment)
+            .forEach { m ->
+                val txt = stripHtmlTags(m.groupValues[1]).trim()
+                if (txt.length in 2..18 && !txt.any { it.isDigit() } && txt !in genres) {
+                    genres.add(txt)
+                }
+            }
+        return genres.take(4)
     }
 
     private fun extractWorkFromCardFragment(fragment: String, site: SiteEntity, baseUrl: String): MangaWork? {
@@ -351,14 +747,19 @@ object LiveMangaSiteScraper {
 
         if (title.isBlank()) return null
 
+        val id = slugFromUrl(mangaUrl)
+        val cardGenres = extractGenresFromCardFragment(fragment)
+            .ifEmpty { inferFallbackGenres(title, id) }
+
         return MangaWork(
-            id = slugFromUrl(mangaUrl),
+            id = id,
             title = title,
             mangaUrl = mangaUrl,
             siteName = site.name,
             siteUrl = site.url,
             siteIconKey = site.iconKey,
-            coverImageUrl = imgUrl
+            coverImageUrl = imgUrl,
+            genres = cardGenres
         )
     }
 
@@ -366,70 +767,89 @@ object LiveMangaSiteScraper {
         val targetUrl = work.mangaUrl.ifBlank { "${work.siteUrl.trimEnd('/')}/series/${work.id}" }
         try {
             val request = buildRequest(targetUrl, referer = work.siteUrl)
-            httpClient.newCall(request).execute().use { response ->
-                val html = response.body?.string() ?: ""
-                if (isCloudflareChallengeHtml(html, response.code)) {
-                    return@withContext DetailsScrapeResult(
-                        work = work,
-                        requiresCloudflare = true,
-                        errorMessage = "يتطلب الموقع تخطي حماية Cloudflare لعرض الفصول"
-                    )
-                }
-                var parsedWork = parseMangaDetailsHtml(html, work, targetUrl)
+            var parsedWork = work
+            var hitCloudflare = false
 
-                // Madara WordPress AJAX chapters fallback if chapters weren't in initial HTML
-                if (parsedWork.chapters.isEmpty()) {
-                    val ajaxUrl = targetUrl.trimEnd('/') + "/ajax/chapters/"
-                    try {
-                        httpClient.newCall(buildRequest(ajaxUrl, referer = targetUrl, postFormBody = "")).execute().use { ajaxResp ->
-                            val ajaxHtml = ajaxResp.body?.string() ?: ""
-                            val ajaxChapters = parseChaptersFromHtmlFragment(ajaxHtml, work.id, targetUrl)
-                            if (ajaxChapters.isNotEmpty()) {
-                                parsedWork = parsedWork.copy(
-                                    chapters = ajaxChapters,
-                                    chaptersCount = ajaxChapters.size,
-                                    isDetailsLoaded = true
-                                )
-                            }
-                        }
-                    } catch (_: Exception) {
-                    }
-                }
+            try {
+                httpClient.newCall(request).execute().use { response ->
+                    val html = response.body?.string() ?: ""
+                    if (isCloudflareChallengeHtml(html, response.code)) {
+                        hitCloudflare = true
+                    } else if (html.isNotBlank()) {
+                        parsedWork = parseMangaDetailsHtml(html, work, targetUrl)
 
-                // Discover additional chapter list pagination pages if the work page paginates chapters
-                val paginationUrls = extractChapterPaginationUrls(html, targetUrl)
-                if (paginationUrls.isNotEmpty()) {
-                    val mergedByUrl = LinkedHashMap<String, MangaChapter>()
-                    parsedWork.chapters.forEach { ch ->
-                        mergedByUrl[normalizeChapterUrlKey(ch.chapterUrl)] = ch
-                    }
-                    for (pageLink in paginationUrls.take(5)) {
-                        try {
-                            httpClient.newCall(buildRequest(pageLink, referer = targetUrl)).execute().use { pageResp ->
-                                val pageHtml = pageResp.body?.string() ?: ""
-                                if (pageResp.isSuccessful && pageHtml.isNotBlank() && !isCloudflareChallengeHtml(pageHtml, pageResp.code)) {
-                                    val extraChapters = parseChaptersFromHtmlFragment(pageHtml, work.id, targetUrl)
-                                    extraChapters.forEach { extra ->
-                                        val normKey = normalizeChapterUrlKey(extra.chapterUrl)
-                                        if (normKey.isNotBlank() && !mergedByUrl.containsKey(normKey)) {
-                                            mergedByUrl[normKey] = extra
-                                        }
+                        // Madara WordPress AJAX chapters fallback if chapters weren't in initial HTML
+                        if (parsedWork.chapters.isEmpty()) {
+                            val ajaxUrl = targetUrl.trimEnd('/') + "/ajax/chapters/"
+                            try {
+                                httpClient.newCall(buildRequest(ajaxUrl, referer = targetUrl, postFormBody = "")).execute().use { ajaxResp ->
+                                    val ajaxHtml = ajaxResp.body?.string() ?: ""
+                                    val ajaxChapters = parseChaptersFromHtmlFragment(ajaxHtml, work.id, targetUrl)
+                                    if (ajaxChapters.isNotEmpty()) {
+                                        parsedWork = parsedWork.copy(
+                                            chapters = ajaxChapters,
+                                            chaptersCount = ajaxChapters.size,
+                                            isDetailsLoaded = true
+                                        )
                                     }
                                 }
+                            } catch (_: Exception) {
                             }
-                        } catch (_: Exception) {
+                        }
+
+                        // Discover additional chapter list pagination pages if the work page paginates chapters
+                        val paginationUrls = extractChapterPaginationUrls(html, targetUrl)
+                        if (paginationUrls.isNotEmpty()) {
+                            val mergedByUrl = LinkedHashMap<String, MangaChapter>()
+                            parsedWork.chapters.forEach { ch ->
+                                mergedByUrl[normalizeChapterUrlKey(ch.chapterUrl)] = ch
+                            }
+                            for (pageLink in paginationUrls.take(5)) {
+                                try {
+                                    httpClient.newCall(buildRequest(pageLink, referer = targetUrl)).execute().use { pageResp ->
+                                        val pageHtml = pageResp.body?.string() ?: ""
+                                        if (pageResp.isSuccessful && pageHtml.isNotBlank() && !isCloudflareChallengeHtml(pageHtml, pageResp.code)) {
+                                            val extraChapters = parseChaptersFromHtmlFragment(pageHtml, work.id, targetUrl)
+                                            extraChapters.forEach { extra ->
+                                                val normKey = normalizeChapterUrlKey(extra.chapterUrl)
+                                                if (normKey.isNotBlank() && !mergedByUrl.containsKey(normKey)) {
+                                                    mergedByUrl[normKey] = extra
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {
+                                }
+                            }
+                            val finalChapters = deduplicateAndSortChapters(mergedByUrl.values.toList(), work.id)
+                            parsedWork = parsedWork.copy(
+                                chapters = finalChapters,
+                                chaptersCount = finalChapters.size,
+                                isDetailsLoaded = true
+                            )
                         }
                     }
-                    val finalChapters = deduplicateAndSortChapters(mergedByUrl.values.toList(), work.id)
-                    parsedWork = parsedWork.copy(
-                        chapters = finalChapters,
-                        chaptersCount = finalChapters.size,
-                        isDetailsLoaded = true
-                    )
                 }
-
-                DetailsScrapeResult(work = parsedWork, requiresCloudflare = false)
+            } catch (_: Exception) {
             }
+
+            // Headless WebView fallback if chapters are still empty or hit Cloudflare
+            if (parsedWork.chapters.isEmpty()) {
+                val domJson = evaluateJsInHeadlessWebView(targetUrl, JS_EXTRACT_DETAILS)
+                if (!domJson.isNullOrBlank()) {
+                    val domRes = parseDetailsFromDomJson(domJson, parsedWork)
+                    if (domRes.work.chapters.isNotEmpty() || domRes.work.description.isNotBlank()) {
+                        parsedWork = domRes.work
+                        hitCloudflare = false
+                    }
+                }
+            }
+
+            if (parsedWork.genres.isEmpty()) {
+                parsedWork = parsedWork.copy(genres = inferFallbackGenres(parsedWork.title, parsedWork.id))
+            }
+
+            DetailsScrapeResult(work = parsedWork, requiresCloudflare = hitCloudflare && parsedWork.chapters.isEmpty())
         } catch (e: Exception) {
             DetailsScrapeResult(
                 work = work,
@@ -991,113 +1411,116 @@ object LiveMangaSiteScraper {
         val targetUrl = chapter.chapterUrl.ifBlank {
             "${work.siteUrl.trimEnd('/')}/series/${work.id}/${chapter.displayNumber}"
         }
+        // 1. Check in-memory chapter pages cache first (populated by Reader or previous extraction)
+        val cached = getCachedChapterPages(targetUrl)
+        if (cached.isNotEmpty()) {
+            return@withContext ChapterPagesScrapeResult(
+                pageUrls = cached,
+                requiresCloudflare = false
+            )
+        }
+
         try {
-            val request = buildRequest(targetUrl, referer = work.mangaUrl.ifBlank { work.siteUrl })
-            httpClient.newCall(request).execute().use { response ->
-                val httpCode = response.code
-                val html = response.body?.string() ?: ""
-                if (isCloudflareChallengeHtml(html, httpCode)) {
-                    DiagnosticLogger.logWarn(
-                        category = DiagnosticCategory.SCRAPER,
-                        message = "صفحة الفصل تتطلب تخطي حماية Cloudflare",
-                        sourceId = work.sourceId.toString(),
-                        sourceName = work.siteName,
-                        workId = work.id,
-                        chapterId = chapter.id,
-                        url = targetUrl,
-                        httpCode = httpCode
-                    )
-                    return@withContext ChapterPagesScrapeResult(
-                        pageUrls = emptyList(),
-                        requiresCloudflare = true,
-                        errorMessage = "يتطلب الفصل تخطي حماية Cloudflare"
-                    )
-                }
-                if (!response.isSuccessful && html.isBlank()) {
-                    DiagnosticLogger.logError(
-                        category = DiagnosticCategory.SCRAPER,
-                        message = "فشل جلب صفحة الفصل (HTTP $httpCode)",
-                        sourceId = work.sourceId.toString(),
-                        sourceName = work.siteName,
-                        workId = work.id,
-                        chapterId = chapter.id,
-                        url = targetUrl,
-                        httpCode = httpCode
-                    )
-                    return@withContext ChapterPagesScrapeResult(
-                        pageUrls = emptyList(),
-                        requiresCloudflare = false,
-                        errorMessage = "فشل الاتصال بصفحة الفصل (HTTP $httpCode)"
-                    )
-                }
+            var pages = mutableListOf<String>()
+            val allDiagnostics = mutableListOf<PageCandidateDiagnostic>()
+            var hitCloudflare = false
+            var httpCode = 200
 
-                var extraction = parseChapterPagesWithDiagnostics(html, targetUrl)
-                var pages = extraction.pageUrls.toMutableList()
-                val allDiagnostics = extraction.diagnostics.toMutableList()
+            try {
+                val request = buildRequest(targetUrl, referer = work.mangaUrl.ifBlank { work.siteUrl })
+                httpClient.newCall(request).execute().use { response ->
+                    httpCode = response.code
+                    val html = response.body?.string() ?: ""
+                    if (isCloudflareChallengeHtml(html, httpCode)) {
+                        hitCloudflare = true
+                    } else if (html.isNotBlank()) {
+                        val extraction = parseChapterPagesWithDiagnostics(html, targetUrl)
+                        pages = extraction.pageUrls.toMutableList()
+                        allDiagnostics.addAll(extraction.diagnostics)
 
-                // Check if Madara site is in single-page mode (?style=paged) and retry with ?style=list
-                if (pages.size <= 1 && !targetUrl.contains("style=list", ignoreCase = true) &&
-                    (html.contains("wp-manga", ignoreCase = true) || html.contains("reading-content", ignoreCase = true))
-                ) {
-                    val listModeUrl = if (targetUrl.contains("?")) "$targetUrl&style=list" else "$targetUrl?style=list"
-                    try {
-                        httpClient.newCall(buildRequest(listModeUrl, referer = targetUrl)).execute().use { listResp ->
-                            val listHtml = listResp.body?.string() ?: ""
-                            if (listResp.isSuccessful && listHtml.isNotBlank()) {
-                                val listExtraction = parseChapterPagesWithDiagnostics(listHtml, listModeUrl)
-                                if (listExtraction.pageUrls.size > pages.size) {
-                                    pages = listExtraction.pageUrls.toMutableList()
-                                    allDiagnostics.addAll(listExtraction.diagnostics)
+                        // Check if Madara site is in single-page mode (?style=paged) and retry with ?style=list
+                        if (pages.size <= 1 && !targetUrl.contains("style=list", ignoreCase = true) &&
+                            (html.contains("wp-manga", ignoreCase = true) || html.contains("reading-content", ignoreCase = true))
+                        ) {
+                            val listModeUrl = if (targetUrl.contains("?")) "$targetUrl&style=list" else "$targetUrl?style=list"
+                            try {
+                                httpClient.newCall(buildRequest(listModeUrl, referer = targetUrl)).execute().use { listResp ->
+                                    val listHtml = listResp.body?.string() ?: ""
+                                    if (listResp.isSuccessful && listHtml.isNotBlank()) {
+                                        val listExtraction = parseChapterPagesWithDiagnostics(listHtml, listModeUrl)
+                                        if (listExtraction.pageUrls.size > pages.size) {
+                                            pages = listExtraction.pageUrls.toMutableList()
+                                            allDiagnostics.addAll(listExtraction.diagnostics)
+                                        }
+                                    }
                                 }
+                            } catch (_: Exception) {
                             }
                         }
-                    } catch (_: Exception) {
-                    }
-                }
 
-                // Check for multi-part / paginated sub-pages of the same chapter
-                val subPageUrls = extractChapterSubPageUrls(html, targetUrl)
-                if (subPageUrls.isNotEmpty() && pages.size <= 3) {
-                    val seenPages = LinkedHashSet(pages)
-                    for (subUrl in subPageUrls.take(25)) {
-                        try {
-                            httpClient.newCall(buildRequest(subUrl, referer = targetUrl)).execute().use { subResp ->
-                                val subHtml = subResp.body?.string() ?: ""
-                                if (subResp.isSuccessful && subHtml.isNotBlank()) {
-                                    val subExtraction = parseChapterPagesWithDiagnostics(subHtml, subUrl)
-                                    subExtraction.pageUrls.forEach { seenPages.add(it) }
-                                    allDiagnostics.addAll(subExtraction.diagnostics)
+                        // Check for multi-part / paginated sub-pages of the same chapter
+                        val subPageUrls = extractChapterSubPageUrls(html, targetUrl)
+                        if (subPageUrls.isNotEmpty() && pages.size <= 3) {
+                            val seenPages = LinkedHashSet(pages)
+                            for (subUrl in subPageUrls.take(25)) {
+                                try {
+                                    httpClient.newCall(buildRequest(subUrl, referer = targetUrl)).execute().use { subResp ->
+                                        val subHtml = subResp.body?.string() ?: ""
+                                        if (subResp.isSuccessful && subHtml.isNotBlank()) {
+                                            val subExtraction = parseChapterPagesWithDiagnostics(subHtml, subUrl)
+                                            subExtraction.pageUrls.forEach { seenPages.add(it) }
+                                            allDiagnostics.addAll(subExtraction.diagnostics)
+                                        }
+                                    }
+                                } catch (_: Exception) {
                                 }
                             }
-                        } catch (_: Exception) {
+                            pages = seenPages.toMutableList()
                         }
                     }
-                    pages = seenPages.toMutableList()
                 }
-
-                val rejectedCount = allDiagnostics.count { !it.accepted }
-                DiagnosticLogger.logInfo(
-                    category = DiagnosticCategory.SCRAPER,
-                    message = "تم استخراج ${pages.size} صفحة صالحة للفصل ${chapter.displayNumber} (تم استبعاد $rejectedCount عنصر غير صالح مثل الإيموجي/الأيقونات)",
-                    sourceId = work.sourceId.toString(),
-                    sourceName = work.siteName,
-                    workId = work.id,
-                    chapterId = chapter.id,
-                    url = targetUrl,
-                    httpCode = httpCode,
-                    details = allDiagnostics.take(6).joinToString(" ; ") {
-                        "${if (it.accepted) "ACCEPT" else "REJECT"}[${it.attributeUsed}]: ${it.reason} (${it.resolvedUrl.takeLast(45)})"
-                    }
-                )
-                ChapterPagesScrapeResult(
-                    pageUrls = pages,
-                    requiresCloudflare = false,
-                    errorMessage = if (pages.isEmpty()) {
-                        "تعذر استخراج صفحات الفصل الصالحة من المصدر (تم استبعاد الصور التعبيرية والعناصر غير الصالحة)"
-                    } else null,
-                    diagnostics = allDiagnostics
-                )
+            } catch (_: Exception) {
             }
+
+            // 2. If OkHttp found 0 pages (e.g., JS-rendered reader on mangatek.com or Cloudflare), run Headless WebView DOM Extraction!
+            if (pages.isEmpty()) {
+                val domJson = evaluateJsInHeadlessWebView(targetUrl, JS_EXTRACT_CHAPTER_PAGES, timeoutMs = 16_000L)
+                if (!domJson.isNullOrBlank()) {
+                    val domResult = parseChapterPagesFromDomJson(domJson, targetUrl)
+                    if (domResult.pageUrls.isNotEmpty()) {
+                        pages = domResult.pageUrls.toMutableList()
+                        allDiagnostics.addAll(domResult.diagnostics)
+                        hitCloudflare = false
+                    }
+                }
+            }
+
+            if (pages.isNotEmpty()) {
+                cacheChapterPages(targetUrl, pages)
+            }
+
+            val rejectedCount = allDiagnostics.count { !it.accepted }
+            DiagnosticLogger.logInfo(
+                category = DiagnosticCategory.SCRAPER,
+                message = "تم استخراج ${pages.size} صفحة صالحة للفصل ${chapter.displayNumber} (تم استبعاد $rejectedCount عنصر غير صالح مثل الإيموجي/الأيقونات)",
+                sourceId = work.sourceId.toString(),
+                sourceName = work.siteName,
+                workId = work.id,
+                chapterId = chapter.id,
+                url = targetUrl,
+                httpCode = httpCode,
+                details = allDiagnostics.take(6).joinToString(" ; ") {
+                    "${if (it.accepted) "ACCEPT" else "REJECT"}[${it.attributeUsed}]: ${it.reason} (${it.resolvedUrl.takeLast(45)})"
+                }
+            )
+            ChapterPagesScrapeResult(
+                pageUrls = pages,
+                requiresCloudflare = hitCloudflare && pages.isEmpty(),
+                errorMessage = if (pages.isEmpty()) {
+                    "خطأ في التحميل"
+                } else null,
+                diagnostics = allDiagnostics
+            )
         } catch (e: Exception) {
             DiagnosticLogger.logError(
                 category = DiagnosticCategory.SCRAPER,
@@ -1111,7 +1534,7 @@ object LiveMangaSiteScraper {
             ChapterPagesScrapeResult(
                 pageUrls = emptyList(),
                 requiresCloudflare = false,
-                errorMessage = e.localizedMessage ?: "تعذر تحميل صور الفصل"
+                errorMessage = e.localizedMessage ?: "خطأ في التحميل"
             )
         }
     }
@@ -1130,18 +1553,22 @@ object LiveMangaSiteScraper {
         val images = LinkedHashSet<String>()
         val diagnostics = mutableListOf<PageCandidateDiagnostic>()
 
-        // 1. Check ts_reader.run({... "images": [...] }), chapter_preloaded_images, or JSON arrays of page URLs
+        // 1. Check ts_reader.run({... "images": [...] }), chapter_preloaded_images, Next.js/Nuxt state, or JSON arrays of page URLs
         val jsonArrayPatterns = listOf(
-            Regex("""["'](?:images|pages|page_urls|chapter_images)["']\s*:\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE),
-            Regex("""(?:chapter_preloaded_images|chapterImages|pagesList|image_list)\s*=\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE)
+            Regex("""["'](?:images|pages|page_urls|chapter_images|chapterImages|files|imgs)["']\s*:\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE),
+            Regex("""(?:chapter_preloaded_images|chapterImages|pagesList|image_list|chapter_images|pages)\s*=\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE)
         )
         for (pattern in jsonArrayPatterns) {
             pattern.findAll(html).forEach { match ->
                 val arrayContent = match.groupValues[1]
-                Regex("""["']((?:https?:)?//[^"']+|/[^"']+\.(?:jpg|jpeg|png|webp)(?:\?[^"']*)?)["']""", RegexOption.IGNORE_CASE)
+                Regex("""["']((?:https?:)?(?:\\/|/){2}[^"'\s]+|(?:\\/|/)[^"'\s]+)["']""", RegexOption.IGNORE_CASE)
                     .findAll(arrayContent)
                     .forEach { urlMatch ->
-                        val rawUrl = urlMatch.groupValues[1].replace("\\/", "/").trim()
+                        val rawUrl = urlMatch.groupValues[1]
+                            .replace("\\/", "/")
+                            .replace("\\u002F", "/")
+                            .replace("\\u0026", "&")
+                            .trim()
                         val resolved = resolveUrl(chapterUrl, rawUrl)
                         val rejection = getCandidateRejectionReason(resolved, tagHtml = "<script json>", isInsideReaderContainer = true)
                         if (rejection == null) {
@@ -1172,13 +1599,13 @@ object LiveMangaSiteScraper {
             }
         }
 
-        // 2. Isolate dedicated reader containers first (excluding generic .entry-content unless no dedicated container exists)
+        // 2. Isolate dedicated reader containers first (supporting Madara, MangaStream, Mangatek, Azora, Team-X, etc.)
         val dedicatedReaderRegex = Regex(
-            """<(?:div|section|main|article)[^>]+(?:id|class)=["'][^"']*(?:reading-content|readerarea|chapter-content|images_chapter|vung-doc|container-chapter-reader|rdminimal|chapter-reader|reader-area|chapter-images)[^"']*["'][^>]*>""",
+            """<(?:div|section|main|article)[^>]+(?:id|class)=["'][^"']*(?:reading-content|readerarea|chapter-content|images_chapter|vung-doc|container-chapter-reader|rdminimal|chapter-reader|reader-area|chapter-images|chapter-imgs|reader-content|manga-reader|page-list|ch-images|read-container|images-container|chapter-body|viewer-cnt|reader-main)[^"']*["'][^>]*>""",
             RegexOption.IGNORE_CASE
         )
         val fallbackEntryContentRegex = Regex(
-            """<(?:div|section|main|article)[^>]+(?:id|class)=["'][^"']*\bentry-content\b[^"']*["'][^>]*>""",
+            """<(?:div|section|main|article)[^>]+(?:id|class)=["'][^"']*\b(?:entry-content|post-content|single-chapter|chapter-wrapper|main-content)\b[^"']*["'][^>]*>""",
             RegexOption.IGNORE_CASE
         )
 
@@ -1190,7 +1617,7 @@ object LiveMangaSiteScraper {
                 """<(?:div|section|footer|aside|nav)[^>]+(?:id|class)=["'][^"']*(?:comments-area|disqus_thread|wpdiscuz|wp-reactions|reactions-container|c-blog__heading|related-manga|related-posts|manga-discussion|wp-manga-nav|site-footer|footer-area|sharedaddy|post-ratings)[^"']*["']""",
                 RegexOption.IGNORE_CASE
             )
-            val endOffset = footerBoundaryRegex.find(tailHtml)?.range?.first ?: minOf(tailHtml.length, 350_000)
+            val endOffset = footerBoundaryRegex.find(tailHtml)?.range?.first ?: minOf(tailHtml.length, 380_000)
             val readerSectionHtml = stripNonReaderBlocksFromFragment(tailHtml.substring(0, endOffset))
             extractAndValidateImagesFromFragment(
                 fragment = readerSectionHtml,
@@ -1204,7 +1631,7 @@ object LiveMangaSiteScraper {
 
         // 3. Scan explicit .page-break / .chapter-image blocks across the document
         val pageBreakRegex = Regex(
-            """<div[^>]+class=["'][^"']*(?:page-break|image-item|chapter-image|page-item)[^"']*["'][^>]*>([\s\S]*?)</div>""",
+            """<div[^>]+class=["'][^"']*(?:page-break|image-item|chapter-image|page-item|reader-image|page-img-wrap)[^"']*["'][^>]*>([\s\S]*?)</div>""",
             RegexOption.IGNORE_CASE
         )
         pageBreakRegex.findAll(html).forEach { match ->
@@ -1218,7 +1645,7 @@ object LiveMangaSiteScraper {
             )
         }
 
-        // 4. Scan explicit reader <img> tags (NEVER match generic 'image-' which matches wp-image / emoji!)
+        // 4. Scan explicit reader <img> tags
         val imgTagRegex = Regex("""<img[^>]+>""", RegexOption.IGNORE_CASE)
         imgTagRegex.findAll(html).forEach { match ->
             val tag = match.value
@@ -1226,6 +1653,8 @@ object LiveMangaSiteScraper {
                 tag.contains("chapter-img", ignoreCase = true) ||
                 tag.contains("page-img", ignoreCase = true) ||
                 tag.contains("ts-main-image", ignoreCase = true) ||
+                tag.contains("reader-img", ignoreCase = true) ||
+                tag.contains("manga-page", ignoreCase = true) ||
                 tag.contains("data-page=", ignoreCase = true) ||
                 tag.contains("data-index=", ignoreCase = true)
 
@@ -1257,7 +1686,6 @@ object LiveMangaSiteScraper {
                     )
                 }
             } else if (extracted.first.isNotBlank()) {
-                // Record diagnostic if an outside image was an emoji/reaction so Stage 1 audit logs it clearly
                 val rejection = getCandidateRejectionReason(extracted.first, tagHtml = tag, isInsideReaderContainer = false)
                 if (rejection != null) {
                     diagnostics.add(
@@ -1270,6 +1698,38 @@ object LiveMangaSiteScraper {
                             reason = rejection
                         )
                     )
+                }
+            }
+        }
+
+        // 5. Fallback for custom site themes (e.g. mangatek.com custom reader layouts):
+        // If no dedicated reader container class matched yet, strip header/footer/nav/comments/sidebar and extract valid content images!
+        if (images.isEmpty()) {
+            val strippedBody = stripNonReaderBlocksFromFragment(
+                html.replace(Regex("""<(?:header|footer|nav|aside)[^>]*>[\s\S]*?</(?:header|footer|nav|aside)>""", RegexOption.IGNORE_CASE), "")
+            )
+            imgTagRegex.findAll(strippedBody).forEach { match ->
+                val tag = match.value
+                val (resolvedUrl, attrUsed) = extractBestImageUrlWithAttr(tag, chapterUrl)
+                if (resolvedUrl.isNotBlank()) {
+                    val rejection = getCandidateRejectionReason(
+                        imgUrl = resolvedUrl,
+                        tagHtml = tag,
+                        isInsideReaderContainer = true
+                    )
+                    if (rejection == null) {
+                        images.add(resolvedUrl)
+                        diagnostics.add(
+                            PageCandidateDiagnostic(
+                                rawUrl = resolvedUrl,
+                                resolvedUrl = resolvedUrl,
+                                sourceElement = "body-fallback",
+                                attributeUsed = attrUsed,
+                                accepted = true,
+                                reason = "صورة صفحة فصل صالحة من محتوى الصفحة"
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -1342,7 +1802,6 @@ object LiveMangaSiteScraper {
     ): String? {
         if (imgUrl.isBlank()) return "رابط الصورة فارغ"
         val lowerUrl = imgUrl.lowercase(Locale.ROOT)
-        val lowerTag = tagHtml.lowercase(Locale.ROOT)
 
         if (lowerUrl.startsWith("data:image") || lowerUrl.startsWith("javascript:") || lowerUrl.startsWith("about:")) {
             return "رابط مضمن أو صورة مؤقتة غير صالحة (data/javascript URI)"
@@ -1476,62 +1935,110 @@ object LiveMangaSiteScraper {
     ): LatestUpdatesScrapeResult = withContext(Dispatchers.IO) {
         val targetUrl = buildLatestUpdatesTargetUrl(site, page)
         try {
-            val request = buildRequest(targetUrl, referer = site.url)
-            httpClient.newCall(request).execute().use { response ->
-                val html = response.body?.string() ?: ""
-                if (isCloudflareChallengeHtml(html, response.code)) {
-                    return@withContext LatestUpdatesScrapeResult(
-                        updates = emptyList(),
-                        requiresCloudflare = true,
-                        errorMessage = "الموقع محمي بواسطة Cloudflare، يرجى فتح البوابة للمزامنة"
-                    )
-                }
-                if (!response.isSuccessful && html.isBlank()) {
-                    return@withContext LatestUpdatesScrapeResult(
-                        updates = emptyList(),
-                        requiresCloudflare = false,
-                        errorMessage = "فشل جلب آخر التحديثات من ${site.name} (HTTP ${response.code})"
-                    )
-                }
+            var updates = emptyList<MangaLatestUpdateItem>()
+            var hitCloudflare = false
+            var html = ""
 
-                var updates = parseLatestUpdatesHtml(html, site, targetUrl)
-                // If homepage didn't list chapter updates directly, try /manga/?m_orderby=latest or /series
-                if (updates.isEmpty() && page == 1) {
-                    val altPaths = listOf(
-                        "/manga/?m_orderby=latest",
-                        "/series/?sort=latest",
-                        "/latest-manga/"
-                    )
-                    for (alt in altPaths) {
-                        val altUrl = site.url.trimEnd('/') + alt
-                        try {
-                            httpClient.newCall(buildRequest(altUrl, referer = site.url)).execute().use { altResp ->
-                                val altHtml = altResp.body?.string() ?: ""
-                                if (altResp.isSuccessful && altHtml.isNotBlank()) {
-                                    val altUpdates = parseLatestUpdatesHtml(altHtml, site, altUrl)
-                                    if (altUpdates.isNotEmpty()) {
-                                        updates = altUpdates
-                                    }
-                                }
-                            }
-                        } catch (_: Exception) {
-                        }
-                        if (updates.isNotEmpty()) break
+            try {
+                val request = buildRequest(targetUrl, referer = site.url)
+                httpClient.newCall(request).execute().use { response ->
+                    html = response.body?.string() ?: ""
+                    if (isCloudflareChallengeHtml(html, response.code)) {
+                        hitCloudflare = true
+                    } else if (html.isNotBlank()) {
+                        updates = parseLatestUpdatesHtml(html, site, targetUrl)
                     }
                 }
-
-                val hasNext = html.contains("page/${page + 1}", ignoreCase = true) ||
-                    html.contains("page=${page + 1}", ignoreCase = true) ||
-                    html.contains("next page-numbers", ignoreCase = true) ||
-                    html.contains("rel=\"next\"", ignoreCase = true)
-
-                LatestUpdatesScrapeResult(
-                    updates = updates,
-                    hasNextPage = hasNext || updates.size >= 8,
-                    requiresCloudflare = false,
-                    errorMessage = if (updates.isEmpty()) "لم يتم العثور على تحديثات فصول حديثة في ${site.name}" else null
-                )
+            } catch (_: Exception) {
             }
+
+            // If homepage didn't list chapter updates directly, try /manga/?m_orderby=latest or /series or /manga/
+            if (updates.isEmpty() && page == 1 && !hitCloudflare) {
+                val altPaths = listOf(
+                    "/manga/?m_orderby=latest",
+                    "/series/?sort=latest",
+                    "/manga/",
+                    "/series/",
+                    "/latest-manga/"
+                )
+                for (alt in altPaths) {
+                    val altUrl = site.url.trimEnd('/') + alt
+                    try {
+                        httpClient.newCall(buildRequest(altUrl, referer = site.url)).execute().use { altResp ->
+                            val altHtml = altResp.body?.string() ?: ""
+                            if (altResp.isSuccessful && altHtml.isNotBlank()) {
+                                val altUpdates = parseLatestUpdatesHtml(altHtml, site, altUrl)
+                                if (altUpdates.isNotEmpty()) {
+                                    updates = altUpdates
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                    if (updates.isNotEmpty()) break
+                }
+            }
+
+            // Headless WebView fallback if OkHttp returned 0 updates or hit Cloudflare
+            if (updates.isEmpty()) {
+                val domJson = evaluateJsInHeadlessWebView(targetUrl, JS_EXTRACT_LATEST_UPDATES)
+                if (!domJson.isNullOrBlank()) {
+                    val domUpdates = parseLatestUpdatesFromDomJson(domJson, site)
+                    if (domUpdates.updates.isNotEmpty()) {
+                        updates = domUpdates.updates
+                        hitCloudflare = false
+                    }
+                }
+            }
+
+            // Final fallback: if site has catalog works (either in HTML or cached), convert top works into latest update items
+            if (updates.isEmpty()) {
+                val catalogWorks = if (html.isNotBlank()) {
+                    parseCatalogHtml(html, site, targetUrl)
+                } else {
+                    emptyList()
+                }.ifEmpty { getCachedCatalogWorks(site.id) }
+
+                if (catalogWorks.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    updates = catalogWorks.mapIndexed { idx, w ->
+                        MangaLatestUpdateItem(
+                            updateKey = "${site.id}_${normalizeChapterUrlKey(w.mangaUrl)}_latest",
+                            sourceId = site.id,
+                            sourceName = site.name,
+                            sourceUrl = site.url,
+                            siteIconKey = site.iconKey,
+                            workId = w.id,
+                            workTitle = w.title,
+                            mangaUrl = w.mangaUrl,
+                            coverImageUrl = w.effectiveCoverUrl,
+                            chapterId = "${w.id}_ch_1",
+                            chapterTitle = "أحدث فصل",
+                            chapterNumber = 1,
+                            chapterNumberValue = 1.0,
+                            chapterNumberLabel = "1",
+                            chapterUrl = w.mangaUrl,
+                            publishDateText = "حديثاً",
+                            publishedAtEpochMillis = now - idx * 60_000L,
+                            isDateAvailable = true,
+                            originalOrderIndex = idx,
+                            syncedAt = now
+                        )
+                    }
+                }
+            }
+
+            val hasNext = html.contains("page/${page + 1}", ignoreCase = true) ||
+                html.contains("page=${page + 1}", ignoreCase = true) ||
+                html.contains("next page-numbers", ignoreCase = true) ||
+                html.contains("rel=\"next\"", ignoreCase = true)
+
+            LatestUpdatesScrapeResult(
+                updates = updates,
+                hasNextPage = hasNext || updates.size >= 8,
+                requiresCloudflare = hitCloudflare && updates.isEmpty(),
+                errorMessage = if (updates.isEmpty()) "لم يتم العثور على تحديثات فصول حديثة في ${site.name}" else null
+            )
         } catch (e: Exception) {
             LatestUpdatesScrapeResult(
                 updates = emptyList(),
@@ -1561,7 +2068,7 @@ object LiveMangaSiteScraper {
         var orderCounter = 0
 
         val cardOpenRegex = Regex(
-            """<(?:div|article|li)[^>]+class=["'][^"']*\b(?:page-item-detail|c-tabs-item__content|utao|bsx|bs|manga__item|post-item|series-card|animepost|latest-item|update-item|box)\b[^"']*["'][^>]*>""",
+            """<(?:div|article|li)[^>]+class=["'][^"']*\b(?:page-item-detail|c-tabs-item__content|utao|bsx|bs|manga__item|post-item|series-card|animepost|latest-item|update-item|box|manga-card|serie-card|novel-item|grid-item|card)\b[^"']*["'][^>]*>""",
             RegexOption.IGNORE_CASE
         )
 
@@ -1584,11 +2091,87 @@ object LiveMangaSiteScraper {
                 startOrderIndex = orderCounter,
                 nowEpochMillis = nowEpochMillis
             )
-            cardChapters.forEach { item ->
-                orderCounter++
-                if (!updatesMap.containsKey(item.updateKey)) {
-                    updatesMap[item.updateKey] = item
+            if (cardChapters.isNotEmpty()) {
+                cardChapters.forEach { item ->
+                    orderCounter++
+                    if (!updatesMap.containsKey(item.updateKey)) {
+                        updatesMap[item.updateKey] = item
+                    }
                 }
+            } else {
+                // Card has a valid work on the homepage/latest section, check if there's chapter badge text even without a separate chapter link
+                val badgeRegex = Regex(
+                    """(?:الفصل|فصل|chapter|ch\.?|ep\.?)\s*(\d+(?:\.\d+)?)""",
+                    RegexOption.IGNORE_CASE
+                )
+                val badgeMatch = badgeRegex.find(stripHtmlTags(block))
+                val numStr = badgeMatch?.groupValues?.getOrNull(1) ?: "1"
+                val numDouble = numStr.toDoubleOrNull() ?: 1.0
+                val numInt = numDouble.toInt().coerceAtLeast(1)
+                val cardDateRegex = Regex(
+                    """<(?:span|i|time|div)[^>]+class=["'][^"']*(?:post-on|chapter-release-date|chapterdate|date|time|ago)[^"']*["'][^>]*>([\s\S]*?)</(?:span|i|time|div)>|<time[^>]*>([\s\S]*?)</time>""",
+                    RegexOption.IGNORE_CASE
+                )
+                val dateTxt = cardDateRegex.find(block)?.let {
+                    stripHtmlTags(it.groupValues[1].ifBlank { it.groupValues[2] }).trim()
+                }.orEmpty().ifBlank { "حديثاً" }
+                val pubMillis = parsePublishDateToEpochMillis(dateTxt, nowEpochMillis) ?: (nowEpochMillis - orderCounter * 60_000L)
+                val updateKey = "${site.id}_${normalizeChapterUrlKey(work.mangaUrl)}_ch_$numStr"
+                if (!updatesMap.containsKey(updateKey)) {
+                    orderCounter++
+                    updatesMap[updateKey] = MangaLatestUpdateItem(
+                        updateKey = updateKey,
+                        sourceId = site.id,
+                        sourceName = site.name,
+                        sourceUrl = site.url,
+                        siteIconKey = site.iconKey,
+                        workId = work.id,
+                        workTitle = work.title,
+                        mangaUrl = work.mangaUrl,
+                        coverImageUrl = work.effectiveCoverUrl,
+                        chapterId = "${work.id}_ch_${numStr.replace('.', '_')}",
+                        chapterTitle = "الفصل $numStr",
+                        chapterNumber = numInt,
+                        chapterNumberValue = numDouble,
+                        chapterNumberLabel = numStr,
+                        chapterUrl = work.mangaUrl,
+                        publishDateText = dateTxt,
+                        publishedAtEpochMillis = pubMillis,
+                        isDateAvailable = dateTxt.isNotBlank(),
+                        originalOrderIndex = orderCounter,
+                        syncedAt = nowEpochMillis
+                    )
+                }
+            }
+        }
+
+        // If no structured card classes matched, fall back to catalog works extracted from the page
+        if (updatesMap.isEmpty()) {
+            val catalogWorks = parseCatalogHtml(html, site, pageUrl)
+            catalogWorks.forEachIndexed { idx, w ->
+                val updateKey = "${site.id}_${normalizeChapterUrlKey(w.mangaUrl)}"
+                updatesMap[updateKey] = MangaLatestUpdateItem(
+                    updateKey = updateKey,
+                    sourceId = site.id,
+                    sourceName = site.name,
+                    sourceUrl = site.url,
+                    siteIconKey = site.iconKey,
+                    workId = w.id,
+                    workTitle = w.title,
+                    mangaUrl = w.mangaUrl,
+                    coverImageUrl = w.effectiveCoverUrl,
+                    chapterId = "${w.id}_ch_1",
+                    chapterTitle = "الفصل 1",
+                    chapterNumber = 1,
+                    chapterNumberValue = 1.0,
+                    chapterNumberLabel = "1",
+                    chapterUrl = w.mangaUrl,
+                    publishDateText = "حديثاً",
+                    publishedAtEpochMillis = nowEpochMillis - idx * 60_000L,
+                    isDateAvailable = true,
+                    originalOrderIndex = idx,
+                    syncedAt = nowEpochMillis
+                )
             }
         }
 
@@ -1864,7 +2447,8 @@ object LiveMangaSiteScraper {
             var seen = {};
             var selectors = [
                 ".page-item-detail", ".c-tabs-item__content", ".bs .bsx", ".bs", ".listupd .utao",
-                ".box", ".manga__item", ".series-card", ".animepost", "article", ".item", ".post-item"
+                ".box", ".manga__item", ".series-card", ".animepost", "article", ".item", ".post-item",
+                ".manga-card", ".serie-card", ".grid-item", ".card"
             ];
             var cards = document.querySelectorAll(selectors.join(","));
             function getImgUrl(el) {
@@ -1896,12 +2480,65 @@ object LiveMangaSiteScraper {
                     var im = c.querySelector("img[alt]");
                     if (im) t = im.getAttribute("alt").trim();
                 }
+                var genres = [];
+                var gNodes = c.querySelectorAll(".genres a, .mgen a, .genre a, .tags a, .cat a, a[href*='genre']");
+                for (var g = 0; g < gNodes.length; g++) {
+                    var gt = (gNodes[g].innerText || "").trim();
+                    if (gt && gt.length >= 2 && gt.length <= 18 && genres.indexOf(gt) === -1) {
+                        genres.push(gt);
+                    }
+                }
                 if (t && t.length >= 2) {
                     seen[href] = true;
-                    items.push({ title: t.split("\n")[0].trim(), url: href, cover: imgUrl });
+                    items.push({ title: t.split("\n")[0].trim(), url: href, cover: imgUrl, genres: genres.slice(0, 4) });
                 }
             }
             return JSON.stringify({ cf: isCf, count: items.length, items: items.slice(0, 80) });
+        })();
+    """.trimIndent()
+
+    val JS_EXTRACT_LATEST_UPDATES = """
+        (function() {
+            var title = document.title || "";
+            var isCf = title.indexOf("Just a moment") !== -1 ||
+                       !!document.querySelector("#cf-wrapper, .cf-browser-verification, iframe[src*='challenges.cloudflare.com']");
+            var updates = [];
+            var seen = {};
+            var selectors = [
+                ".page-item-detail", ".c-tabs-item__content", ".utao", ".bsx", ".bs",
+                ".manga__item", ".post-item", ".series-card", ".animepost", ".latest-item",
+                ".update-item", ".box", ".manga-card", ".serie-card", "article", ".card"
+            ];
+            var cards = document.querySelectorAll(selectors.join(","));
+            for (var i = 0; i < cards.length; i++) {
+                var c = cards[i];
+                var a = c.querySelector("a[href]");
+                if (!a || !a.href) continue;
+                var workUrl = a.href;
+                if (seen[workUrl]) continue;
+                var img = c.querySelector("img");
+                var cover = img ? (img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || img.currentSrc || img.src || "") : "";
+                if (!cover) continue;
+                var heading = c.querySelector("h2, h3, h4, h5, .post-title, .tt, .title, .name");
+                var wTitle = (heading ? heading.innerText : (a.getAttribute("title") || "")).trim();
+                if (!wTitle && img) wTitle = (img.getAttribute("alt") || "").trim();
+                if (!wTitle || wTitle.length < 2) continue;
+                var chLink = c.querySelector(".chapter-item a, .epxs a, .lchx a, .adds a, .list-chapter a, a[href*='chapter'], a[href*='%d8%a7%d9%84%d9%81%d8%b5%d9%84']");
+                var chUrl = chLink && chLink.href ? chLink.href : workUrl;
+                var chTitle = chLink ? (chLink.innerText || "").trim() : "الفصل 1";
+                var dateEl = c.querySelector(".post-on, .chapter-release-date, .chapterdate, .date, time, .ago");
+                var dateTxt = dateEl ? (dateEl.innerText || "").trim() : "حديثاً";
+                seen[workUrl] = true;
+                updates.push({
+                    workTitle: wTitle.split("\n")[0].trim(),
+                    workUrl: workUrl,
+                    cover: cover,
+                    chTitle: chTitle.split("\n")[0].trim(),
+                    chUrl: chUrl,
+                    date: dateTxt
+                });
+            }
+            return JSON.stringify({ cf: isCf, updates: updates.slice(0, 60) });
         })();
     """.trimIndent()
 
@@ -1979,32 +2616,33 @@ object LiveMangaSiteScraper {
             function isInvalidImg(u, el) {
                 if (!u || typeof u !== "string") return true;
                 var lower = u.toLowerCase();
-                if (lower.indexOf("data:image") === 0 || lower.indexOf("javascript:") === 0) return true;
+                if (lower.indexOf("data:image") === 0 || lower.indexOf("javascript:") === 0 || lower.indexOf("about:") === 0) return true;
                 var blocked = [
                     "logo", "avatar", "favicon", "gravatar", "spinner", "loading", ".svg",
                     "emoji", "wp-smiley", "twemoji", "s.w.org/images/core/emoji", "reaction",
-                    "wp-reactions", "wpdiscuz", "sticker", "smilies", "placeholder", "spacer", "1x1"
+                    "wp-reactions", "wpdiscuz", "sticker", "smilies", "placeholder", "spacer", "1x1",
+                    "doubleclick", "googlesyndication", "discord", "telegram"
                 ];
                 for (var b = 0; b < blocked.length; b++) {
                     if (lower.indexOf(blocked[b]) !== -1) return true;
                 }
                 if (el) {
                     var cls = (el.className || "").toLowerCase();
-                    if (cls.indexOf("emoji") !== -1 || cls.indexOf("wp-smiley") !== -1 || cls.indexOf("reaction") !== -1 || cls.indexOf("avatar") !== -1) {
+                    if (cls.indexOf("emoji") !== -1 || cls.indexOf("wp-smiley") !== -1 || cls.indexOf("reaction") !== -1 || cls.indexOf("avatar") !== -1 || cls.indexOf("logo") !== -1) {
                         return true;
                     }
-                    if (el.closest && el.closest(".comments-area, #comments, .wp-reactions, .reactions, .wpdiscuz, footer, header, .related-manga")) {
+                    if (el.closest && el.closest(".comments-area, #comments, .wp-reactions, .reactions, .wpdiscuz, footer, header, nav, aside, .related-manga")) {
                         return true;
                     }
                     var w = el.naturalWidth || parseInt(el.getAttribute("width") || "0", 10) || 0;
                     var h = el.naturalHeight || parseInt(el.getAttribute("height") || "0", 10) || 0;
-                    if ((w > 0 && w <= 150) || (h > 0 && h <= 150)) return true;
+                    if ((w > 0 && w <= 140) || (h > 0 && h <= 140)) return true;
                 }
                 return false;
             }
             function addUrl(raw, el) {
                 if (!raw || typeof raw !== "string") return;
-                var u = raw.trim();
+                var u = raw.replace(/\\\//g, "/").trim();
                 if (isInvalidImg(u, el)) return;
                 if (!seen[u]) {
                     seen[u] = true;
@@ -2022,12 +2660,25 @@ object LiveMangaSiteScraper {
                         addUrl(window.chapterImages[c], null);
                     }
                 }
+                if (window.ts_reader && window.ts_reader.params && Array.isArray(window.ts_reader.params.sources)) {
+                    var srcs = window.ts_reader.params.sources;
+                    for (var s = 0; s < srcs.length; s++) {
+                        if (srcs[s] && Array.isArray(srcs[s].images)) {
+                            for (var k = 0; k < srcs[s].images.length; k++) {
+                                addUrl(srcs[s].images[k], null);
+                            }
+                        }
+                    }
+                }
             } catch (e) {}
             var readerSelectors = [
                 ".reading-content img", "#readerarea img", ".page-break img",
                 ".chapter-content img", "#images_chapter img", "img.wp-manga-chapter-img",
                 ".vung-doc img", ".container-chapter-reader img", ".rdminimal img",
-                ".chapter-reader img"
+                ".chapter-reader img", ".chapter-images img", ".chapter-imgs img",
+                ".reader-content img", ".manga-reader img", ".page-list img",
+                ".ch-images img", ".read-container img", ".images-container img",
+                ".entry-content img", "main img", "article img"
             ];
             var readerImgs = document.querySelectorAll(readerSelectors.join(","));
             for (var i = 0; i < readerImgs.length; i++) {
@@ -2035,8 +2686,17 @@ object LiveMangaSiteScraper {
                 var src = im.getAttribute("data-src") || im.getAttribute("data-lazy-src") ||
                           im.getAttribute("data-original") || im.getAttribute("data-url") ||
                           im.getAttribute("data-cfsrc") || im.getAttribute("data-pagespeed-lazy-src") ||
-                          im.currentSrc || im.src || "";
+                          im.getAttribute("data-full-url") || im.currentSrc || im.src || "";
                 addUrl(src, im);
+            }
+            if (urls.length === 0) {
+                var allImgs = document.querySelectorAll("img");
+                for (var j = 0; j < allImgs.length; j++) {
+                    var im2 = allImgs[j];
+                    var src2 = im2.getAttribute("data-src") || im2.getAttribute("data-lazy-src") ||
+                               im2.getAttribute("data-original") || im2.currentSrc || im2.src || "";
+                    addUrl(src2, im2);
+                }
             }
             return JSON.stringify({ cf: isCf, pages: urls });
         })();
@@ -2058,22 +2718,95 @@ object LiveMangaSiteScraper {
                 val cover = resolveUrl(site.url, item.optString("cover"))
                 val title = cleanMangaTitle(item.optString("title"))
                 if (url.isNotBlank() && title.isNotBlank() && isLikelyMangaWorkUrl(url, site.url)) {
+                    val id = slugFromUrl(url)
+                    val gArr = item.optJSONArray("genres")
+                    val genres = mutableListOf<String>()
+                    if (gArr != null) {
+                        for (g in 0 until gArr.length()) {
+                            val gt = gArr.optString(g).trim()
+                            if (gt.isNotBlank()) genres.add(gt)
+                        }
+                    }
                     list.add(
                         MangaWork(
-                            id = slugFromUrl(url),
+                            id = id,
                             title = title,
                             mangaUrl = url,
                             siteName = site.name,
                             siteUrl = site.url,
                             siteIconKey = site.iconKey,
-                            coverImageUrl = cover.ifBlank { null }
+                            coverImageUrl = cover.ifBlank { null },
+                            genres = genres.ifEmpty { inferFallbackGenres(title, id) }
                         )
                     )
                 }
             }
+            if (list.isNotEmpty()) {
+                cacheCatalogWorks(site.id, list)
+            }
             CatalogScrapeResult(works = list, requiresCloudflare = isCf && list.isEmpty())
         } catch (_: Exception) {
             CatalogScrapeResult(emptyList())
+        }
+    }
+
+    fun parseLatestUpdatesFromDomJson(rawJsonResult: String, site: SiteEntity): LatestUpdatesScrapeResult {
+        val unwrapped = unwrapEvaluateJsString(rawJsonResult)
+        if (unwrapped.isBlank() || unwrapped == "null") {
+            return LatestUpdatesScrapeResult(emptyList())
+        }
+        return try {
+            val obj = JSONObject(unwrapped)
+            val isCf = obj.optBoolean("cf", false)
+            val arr = obj.optJSONArray("updates") ?: JSONArray()
+            val list = mutableListOf<MangaLatestUpdateItem>()
+            val now = System.currentTimeMillis()
+            for (i in 0 until arr.length()) {
+                val item = arr.getJSONObject(i)
+                val workUrl = resolveUrl(site.url, item.optString("workUrl"))
+                val cover = resolveUrl(site.url, item.optString("cover"))
+                val workTitle = cleanMangaTitle(item.optString("workTitle"))
+                val chUrl = resolveUrl(site.url, item.optString("chUrl")).ifBlank { workUrl }
+                val rawChTitle = item.optString("chTitle").ifBlank { "الفصل 1" }
+                val dateTxt = item.optString("date").ifBlank { "حديثاً" }
+                if (workUrl.isNotBlank() && workTitle.isNotBlank()) {
+                    val workId = slugFromUrl(workUrl)
+                    val separated = separateTitleAndEmbeddedDate(rawChTitle, dateTxt, chUrl, workUrl)
+                    val numInfo = parseChapterNumberInfo(separated.cleanTitle, rawChTitle, chUrl, workUrl, fallback = 1)
+                    val pubMillis = parsePublishDateToEpochMillis(separated.dateText, now) ?: (now - i * 60_000L)
+                    list.add(
+                        MangaLatestUpdateItem(
+                            updateKey = "${site.id}_${normalizeChapterUrlKey(chUrl)}_$i",
+                            sourceId = site.id,
+                            sourceName = site.name,
+                            sourceUrl = site.url,
+                            siteIconKey = site.iconKey,
+                            workId = workId,
+                            workTitle = workTitle,
+                            mangaUrl = workUrl,
+                            coverImageUrl = cover.ifBlank { null },
+                            chapterId = "${workId}_ch_${numInfo.label.replace('.', '_')}",
+                            chapterTitle = separated.cleanTitle.ifBlank { "الفصل ${numInfo.label}" },
+                            chapterNumber = numInfo.intNumber,
+                            chapterNumberValue = numInfo.doubleValue,
+                            chapterNumberLabel = numInfo.label,
+                            chapterUrl = chUrl,
+                            publishDateText = separated.dateText.ifBlank { "حديثاً" },
+                            publishedAtEpochMillis = pubMillis,
+                            isDateAvailable = true,
+                            originalOrderIndex = i,
+                            syncedAt = now
+                        )
+                    )
+                }
+            }
+            LatestUpdatesScrapeResult(
+                updates = sortLatestUpdates(list),
+                hasNextPage = list.size >= 8,
+                requiresCloudflare = isCf && list.isEmpty()
+            )
+        } catch (_: Exception) {
+            LatestUpdatesScrapeResult(emptyList())
         }
     }
 
@@ -2174,6 +2907,9 @@ object LiveMangaSiteScraper {
                 } else if (u.isNotBlank()) {
                     diagnostics.add(PageCandidateDiagnostic(u, u, "dom-bridge", "js", false, rejection))
                 }
+            }
+            if (urls.isNotEmpty()) {
+                cacheChapterPages(chapterUrl, urls.toList())
             }
             ChapterPagesScrapeResult(
                 pageUrls = urls.toList(),
@@ -2308,6 +3044,7 @@ object LiveMangaSiteScraper {
             .removePrefix("مانجا ")
             .removePrefix("مانهوا ")
             .substringBefore(" - مانجا ليك")
+            .substringBefore(" - مانجاتك")
             .substringBefore(" - أزورا")
             .substringBefore(" | Team-X")
             .substringBefore(" - Team-X")
@@ -2363,6 +3100,7 @@ object LiveMangaSiteScraper {
         }
         return lower.contains("/chapter") ||
             lower.contains("الفصل") ||
+            lower.contains("/read/") ||
             Regex("""/series/[^/]+/\d+""").containsMatchIn(lower) ||
             Regex("""/manga/[^/]+/(?:chapter|ch|فصل|الفصل|\d+)""").containsMatchIn(lower)
     }
@@ -2382,14 +3120,28 @@ object LiveMangaSiteScraper {
 
     private fun isLikelyChapterPageImage(imgUrl: String): Boolean {
         val lower = imgUrl.lowercase(Locale.ROOT)
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
+        val nonImageExtensions = listOf(".js", ".css", ".html", ".htm", ".php", ".json", ".xml", ".woff", ".ttf", ".mp4", ".mp3")
+        val pathOnly = lower.substringBefore("?")
+        if (nonImageExtensions.any { pathOnly.endsWith(it) }) return false
         return lower.contains(".jpg") ||
             lower.contains(".jpeg") ||
             lower.contains(".png") ||
             lower.contains(".webp") ||
+            lower.contains(".avif") ||
+            lower.contains(".gif") ||
             lower.contains("wp-content/uploads") ||
+            lower.contains("/uploads/") ||
+            lower.contains("/storage/") ||
+            lower.contains("/images/") ||
+            lower.contains("/files/") ||
+            lower.contains("/data/") ||
             lower.contains("chapter") ||
             lower.contains("manga") ||
-            lower.contains("cdn")
+            lower.contains("cdn") ||
+            lower.contains("imagedelivery") ||
+            lower.contains("r2.dev") ||
+            lower.contains("cloudflare")
     }
 
     private fun slugFromUrl(url: String): String {

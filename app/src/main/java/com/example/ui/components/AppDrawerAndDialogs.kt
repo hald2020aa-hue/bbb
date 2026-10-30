@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import android.annotation.SuppressLint
+import android.webkit.CookieManager
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -80,7 +85,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import com.example.data.LiveMangaSiteScraper
 import com.example.data.local.SiteEntity
 import com.example.ui.theme.AppDialogSurface
 import com.example.ui.theme.AppDividerColor
@@ -521,6 +528,7 @@ private fun DrawerMenuItem(
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun AddSiteFlowDialog(
     state: AddSiteDialogState,
@@ -528,7 +536,8 @@ fun AddSiteFlowDialog(
     onStep1Submit: () -> Unit,
     onStep2NameChange: (String) -> Unit,
     onStep2Confirm: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onVerificationCompleted: (String?) -> Unit = {}
 ) {
     if (state is AddSiteDialogState.Hidden) return
 
@@ -660,6 +669,57 @@ fun AddSiteFlowDialog(
                                 color = PeriwinklePrimary,
                                 trackColor = Color(0xFF2D3242)
                             )
+                        }
+
+                        // Initial Site Verification WebView (00:08 - 00:22 of reference video: runs once when adding the site)
+                        if (state.verificationUrl != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(230.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF141720))
+                                    .border(1.dp, Color(0xFF2E3446), RoundedCornerShape(12.dp))
+                            ) {
+                                AndroidView(
+                                    modifier = Modifier.fillMaxSize(),
+                                    factory = { ctx ->
+                                        WebView(ctx).apply {
+                                            val cm = CookieManager.getInstance()
+                                            cm.setAcceptCookie(true)
+                                            cm.setAcceptThirdPartyCookies(this, true)
+                                            settings.javaScriptEnabled = true
+                                            settings.domStorageEnabled = true
+                                            settings.databaseEnabled = true
+                                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                            val ua = settings.userAgentString
+                                            if (!ua.isNullOrBlank()) {
+                                                LiveMangaSiteScraper.activeUserAgent = ua.replace("; wv", "")
+                                                settings.userAgentString = LiveMangaSiteScraper.activeUserAgent
+                                            }
+                                            webViewClient = object : WebViewClient() {
+                                                override fun onPageFinished(view: WebView?, url: String?) {
+                                                    super.onPageFinished(view, url)
+                                                    try {
+                                                        CookieManager.getInstance().flush()
+                                                    } catch (_: Throwable) {}
+                                                    val pageTitle = view?.title
+                                                    if (!pageTitle.isNullOrBlank() &&
+                                                        !pageTitle.contains("Just a moment", ignoreCase = true) &&
+                                                        !pageTitle.contains("Cloudflare", ignoreCase = true)
+                                                    ) {
+                                                        view.postDelayed({
+                                                            onVerificationCompleted(pageTitle)
+                                                        }, 400L)
+                                                    }
+                                                }
+                                            }
+                                            loadUrl(state.verificationUrl)
+                                        }
+                                    }
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(22.dp))

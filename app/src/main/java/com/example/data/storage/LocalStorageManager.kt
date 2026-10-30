@@ -497,6 +497,121 @@ class LocalStorageManager(private val context: Context) {
         }
     }
 
+    /**
+     * يصدر صور الفصل المحمل إلى ملف أرشيف قصص مصورة قياسي بصيغة .cbz مع ملف ComicInfo.xml
+     */
+    fun exportChapterToCbz(
+        sourceId: Long,
+        workId: String,
+        workTitle: String,
+        chapterNumber: Int,
+        chapterTitle: String,
+        localPaths: List<String>
+    ): File? {
+        val validFiles = localPaths.map { File(it) }.filter { isValidImageFile(it) }
+        if (validFiles.isEmpty()) return null
+        return try {
+            val exportDir = File(getRootSavedDir(), "cbz_exports")
+            if (!exportDir.exists()) exportDir.mkdirs()
+            val safeTitle = sanitizeSegment(workTitle).take(45).ifBlank { sanitizeSegment(workId) }
+            val cbzFile = File(exportDir, "${safeTitle}_Ch_${chapterNumber}.cbz")
+            java.util.zip.ZipOutputStream(cbzFile.outputStream().buffered()).use { zos ->
+                // Add ComicInfo.xml metadata
+                val comicInfoXml = """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <ComicInfo>
+                      <Series>${workTitle.replace("&", "&amp;").replace("<", "&lt;")}</Series>
+                      <Title>${chapterTitle.replace("&", "&amp;").replace("<", "&lt;")}</Title>
+                      <Number>$chapterNumber</Number>
+                      <PageCount>${validFiles.size}</PageCount>
+                    </ComicInfo>
+                """.trimIndent()
+                val metaEntry = java.util.zip.ZipEntry("ComicInfo.xml")
+                zos.putNextEntry(metaEntry)
+                zos.write(comicInfoXml.toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+
+                validFiles.forEachIndexed { idx, imgFile ->
+                    val ext = imgFile.extension.ifBlank { "jpg" }
+                    val entryName = String.format("%03d.%s", idx + 1, ext)
+                    zos.putNextEntry(java.util.zip.ZipEntry(entryName))
+                    imgFile.inputStream().use { input ->
+                        input.copyTo(zos)
+                    }
+                    zos.closeEntry()
+                }
+            }
+            if (cbzFile.exists() && cbzFile.length() > 128L) cbzFile else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * يستورد ملف .cbz أو .zip ويستخرج صفحاته إلى مجلد الفصول المحلية لقراءتها بدون إنترنت
+     */
+    fun extractCbzArchiveToChapter(
+        inputStream: java.io.InputStream,
+        archiveFileName: String
+    ): Triple<String, Int, List<String>>? {
+        return try {
+            val baseName = archiveFileName.substringBeforeLast(".")
+            val chapterMatch = Regex("""(?:ch|chapter|فصل)[_\-\s]*(\d+)""", RegexOption.IGNORE_CASE).find(baseName)
+            val chapterNumber = chapterMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+            val cleanWorkTitle = baseName
+                .replace(Regex("""[_\-\s]*(?:ch|chapter|فصل)[_\-\s]*\d+.*$""", RegexOption.IGNORE_CASE), "")
+                .replace("_", " ")
+                .trim()
+                .ifBlank { baseName.ifBlank { "مانجا مستوردة CBZ" } }
+
+            val workId = "cbz_${sanitizeSegment(cleanWorkTitle).lowercase()}"
+            val chapterKey = "${workId}_ch_$chapterNumber"
+            val extractedEntries = mutableListOf<Pair<String, ByteArray>>()
+
+            java.util.zip.ZipInputStream(inputStream.buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        val name = entry.name.substringAfterLast("/")
+                        val lower = name.lowercase()
+                        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") ||
+                            lower.endsWith(".png") || lower.endsWith(".webp") || lower.endsWith(".gif")
+                        ) {
+                            val bytes = zis.readBytes()
+                            if (isValidImageBytes(bytes)) {
+                                extractedEntries.add(name to bytes)
+                            }
+                        }
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+
+            if (extractedEntries.isEmpty()) return null
+            val sorted = extractedEntries.sortedBy { it.first.lowercase() }
+            val savedPaths = mutableListOf<String>()
+            sorted.forEachIndexed { index, (name, bytes) ->
+                val ext = name.substringAfterLast(".", "jpg").lowercase()
+                val file = saveChapterPageImage(
+                    sourceId = 0L,
+                    workId = workId,
+                    chapterKey = chapterKey,
+                    pageIndex = index,
+                    bytes = bytes,
+                    extension = ext
+                )
+                savedPaths.add(file.absolutePath)
+                if (index == 0) {
+                    saveCoverImage(0L, workId, bytes, allowSyntheticFallback = false)
+                }
+            }
+            Triple(cleanWorkTitle, chapterNumber, savedPaths)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     companion object {
         fun sanitizeSegment(raw: String): String {
             return raw.replace(Regex("[^a-zA-Z0-9_\\-\u0600-\u06FF]"), "_")
@@ -508,6 +623,100 @@ class LocalStorageManager(private val context: Context) {
             val safeWork = sanitizeSegment(workId)
             val safeChId = sanitizeSegment(chapterId.ifBlank { "ch_$chapterNumber" })
             return "src_${sourceId}_${safeWork}_${chapterNumber}_$safeChId"
+        }
+
+        /**
+         * يزيل الهوامش البيضاء أو السوداء المتجانسة حول صفحة المانجا تلقائياً لملء الشاشة
+         */
+        fun cropUniformBorders(bitmap: Bitmap): Bitmap {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w < 120 || h < 120) return bitmap
+            return try {
+                val maxMarginX = (w * 0.14f).toInt()
+                val maxMarginY = (h * 0.12f).toInt()
+                val stepX = (w / 24).coerceAtLeast(4)
+                val stepY = (h / 24).coerceAtLeast(4)
+
+                fun isBorderPixel(pixel: Int): Boolean {
+                    val r = Color.red(pixel)
+                    val g = Color.green(pixel)
+                    val b = Color.blue(pixel)
+                    val isNearWhite = r > 238 && g > 238 && b > 238
+                    val isNearBlack = r < 18 && g < 18 && b < 18
+                    return isNearWhite || isNearBlack
+                }
+
+                var top = 0
+                while (top < maxMarginY) {
+                    var uniform = true
+                    var x = stepX
+                    while (x < w - stepX) {
+                        if (!isBorderPixel(bitmap.getPixel(x, top))) {
+                            uniform = false
+                            break
+                        }
+                        x += stepX
+                    }
+                    if (!uniform) break
+                    top += 2
+                }
+
+                var bottom = h - 1
+                while (bottom > h - 1 - maxMarginY) {
+                    var uniform = true
+                    var x = stepX
+                    while (x < w - stepX) {
+                        if (!isBorderPixel(bitmap.getPixel(x, bottom))) {
+                            uniform = false
+                            break
+                        }
+                        x += stepX
+                    }
+                    if (!uniform) break
+                    bottom -= 2
+                }
+
+                var left = 0
+                while (left < maxMarginX) {
+                    var uniform = true
+                    var y = top + stepY
+                    while (y < bottom - stepY) {
+                        if (!isBorderPixel(bitmap.getPixel(left, y))) {
+                            uniform = false
+                            break
+                        }
+                        y += stepY
+                    }
+                    if (!uniform) break
+                    left += 2
+                }
+
+                var right = w - 1
+                while (right > w - 1 - maxMarginX) {
+                    var uniform = true
+                    var y = top + stepY
+                    while (y < bottom - stepY) {
+                        if (!isBorderPixel(bitmap.getPixel(right, y))) {
+                            uniform = false
+                            break
+                        }
+                        y += stepY
+                    }
+                    if (!uniform) break
+                    right -= 2
+                }
+
+                val newW = (right - left + 1).coerceAtLeast(w / 2)
+                val newH = (bottom - top + 1).coerceAtLeast(h / 2)
+                if (left > 4 || top > 4 || (w - right) > 4 || (h - bottom) > 4) {
+                    Bitmap.createBitmap(bitmap, left, top, newW, newH)
+                } else {
+                    bitmap
+                }
+            } catch (_: Throwable) {
+                bitmap
+            }
         }
     }
 }

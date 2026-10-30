@@ -96,7 +96,7 @@ object MangaCoilImageLoader {
             maxRequests = 8
             maxRequestsPerHost = 4
         }
-        val okHttp = OkHttpClient.Builder()
+        val okHttp = LiveMangaSiteScraper.httpClient.newBuilder()
             .dispatcher(dispatcher)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
@@ -275,6 +275,7 @@ fun ChapterPageIllustration(
     pageImageUrl: String? = null,
     localFilePath: String? = null,
     refererUrl: String? = null,
+    autoCropBorders: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -343,12 +344,25 @@ fun ChapterPageIllustration(
         return
     }
 
-    val imageRequest = remember(hasValidLocalFile, cleanLocalPath, cleanUrl, refererUrl, retryNonce) {
+    val imageRequest = remember(hasValidLocalFile, cleanLocalPath, cleanUrl, refererUrl, retryNonce, autoCropBorders) {
+        val cropTransformations = if (autoCropBorders) {
+            listOf(
+                object : coil.transform.Transformation {
+                    override val cacheKey: String = "auto_crop_borders_v1"
+                    override suspend fun transform(input: Bitmap, size: coil.size.Size): Bitmap {
+                        return com.example.data.storage.LocalStorageManager.cropUniformBorders(input)
+                    }
+                }
+            )
+        } else {
+            emptyList()
+        }
         if (hasValidLocalFile) {
             // Read directly from local disk without any network request (100% offline capable in Airplane mode)
             ImageRequest.Builder(context)
                 .data(File(cleanLocalPath))
                 .crossfade(false)
+                .transformations(cropTransformations)
                 .setParameter("retry_nonce", retryNonce)
                 .listener(
                     onError = { _, result ->
@@ -370,6 +384,7 @@ fun ChapterPageIllustration(
             val builder = ImageRequest.Builder(context)
                 .data(cleanUrl)
                 .crossfade(false)
+                .transformations(cropTransformations)
                 .diskCachePolicy(CachePolicy.ENABLED)
                 .memoryCachePolicy(
                     if (retryNonce > 0) CachePolicy.WRITE_ONLY else CachePolicy.ENABLED
@@ -445,7 +460,7 @@ fun ChapterPageIllustration(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(260.dp)
-                    .background(Color(0xFF131620))
+                    .background(Color.Black)
                     .padding(16.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -453,35 +468,25 @@ fun ChapterPageIllustration(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.BrokenImage,
-                        contentDescription = "فشل تحميل الصفحة",
-                        tint = Color(0xFFE57373),
-                        modifier = Modifier.size(34.dp)
-                    )
                     Text(
-                        text = "فشل تحميل الصفحة ${pageIndex + 1} من $totalPages",
-                        color = TextPrimaryWhite,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
+                        text = "خطأ في التحميل",
+                        color = TextSecondaryGrey,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
                     )
-                    if (lastErrorReason.isNotBlank()) {
-                        Text(
-                            text = lastErrorReason.take(90),
-                            color = TextSecondaryGrey,
-                            fontSize = 11.sp,
-                            textAlign = TextAlign.Center,
-                            maxLines = 2
-                        )
-                    }
-                    OutlinedButton(
+                    androidx.compose.material3.TextButton(
                         onClick = { retryNonce++ },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = PeriwinklePrimary),
                         modifier = Modifier.testTag("retry_page_button_${pageIndex + 1}")
                     ) {
-                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("إعادة محاولة الصفحة ${pageIndex + 1}", fontSize = 12.sp)
+                        Text(
+                            text = "حاول مجددا",
+                            color = TextPrimaryWhite,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            style = androidx.compose.ui.text.TextStyle(
+                                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+                            )
+                        )
                     }
                 }
             }

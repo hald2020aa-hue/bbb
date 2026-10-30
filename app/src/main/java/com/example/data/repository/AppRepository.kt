@@ -68,11 +68,11 @@ class AppRepository(
     val dao: AppDao,
     private val settingsDataStore: UserSettingsDataStore
 ) {
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    init {
+        LiveMangaSiteScraper.initContext(context.applicationContext)
+    }
+
+    private val httpClient = LiveMangaSiteScraper.httpClient
 
     val localStorageManager = LocalStorageManager(context)
     val notificationHelper = DownloadNotificationHelper(context)
@@ -294,6 +294,19 @@ class AppRepository(
     }
 
     suspend fun deleteFavorite(favorite: FavoriteEntity) = dao.deleteFavorite(favorite)
+
+    suspend fun updateFavoriteCategory(favorite: FavoriteEntity, newCategory: String) {
+        dao.insertFavorite(favorite.copy(category = newCategory.ifBlank { "الكل" }))
+    }
+
+    suspend fun ensureDefaultCategories() = withContext(Dispatchers.IO) {
+        val defaultNames = listOf("أقرأها حالياً", "مكتملة", "مؤجلة", "أرغب بقراءتها")
+        defaultNames.forEachIndexed { idx, name ->
+            runCatching {
+                dao.insertCategory(FavoriteCategoryEntity(name = name, sortOrder = idx))
+            }
+        }
+    }
 
     suspend fun addCategory(name: String) {
         if (name.isBlank()) return
@@ -572,6 +585,12 @@ class AppRepository(
     suspend fun togglePauseDownloadTask(task: DownloadTaskEntity) =
         mangaDownloadManager.togglePauseTask(task)
 
+    fun setAllDownloadsPaused(paused: Boolean) =
+        mangaDownloadManager.setPauseAllDownloads(paused)
+
+    fun reorderDownloadTask(task: DownloadTaskEntity, moveUp: Boolean) =
+        mangaDownloadManager.reorderQueueTask(task, moveUp)
+
     suspend fun cancelDownloadTask(task: DownloadTaskEntity) =
         mangaDownloadManager.cancelTask(task)
 
@@ -616,6 +635,60 @@ class AppRepository(
         mangaDownloadManager.enqueueChaptersDownload(work, listOf(chapter))
     }
 
+    suspend fun exportChapterToCbz(work: MangaWork, chapter: MangaChapter): File? = withContext(Dispatchers.IO) {
+        val chapterKey = chapter.chapterKey.ifBlank { "${work.id}_ch_${chapter.number}" }
+        val chEntity = dao.getDownloadedChapterByKey(chapterKey)
+            ?: dao.getDownloadedChaptersForWorkOnce(work.id).find { it.chapterNumber == chapter.number }
+        val localPaths = if (chapter.localPagePaths.isNotEmpty()) {
+            chapter.localPagePaths
+        } else if (chEntity != null) {
+            localStorageManager.decodeLocalPathsJson(chEntity.localPagesJson)
+        } else {
+            emptyList()
+        }
+        if (localPaths.isEmpty()) return@withContext null
+        val file = localStorageManager.exportChapterToCbz(
+            sourceId = work.sourceId,
+            workId = work.id,
+            workTitle = work.title,
+            chapterNumber = chapter.number,
+            chapterTitle = chapter.title,
+            localPaths = localPaths
+        )
+        if (file != null) {
+            dao.insertSavedWork(
+                SavedWorkEntity(
+                    title = "${work.title} - الفصل ${chapter.number} (.cbz)",
+                    sourceUrl = work.mangaUrl.ifBlank { "cbz://${work.id}/${chapter.number}" },
+                    localFilePath = file.absolutePath,
+                    fileSizeBytes = file.length(),
+                    fileType = "DOWNLOAD"
+                )
+            )
+        }
+        file
+    }
+
+    suspend fun exportWorkToCbzFiles(work: MangaWork): List<File> = withContext(Dispatchers.IO) {
+        val exported = mutableListOf<File>()
+        val downloadedChapters = dao.getDownloadedChaptersForWorkOnce(work.id)
+        for (chEntity in downloadedChapters) {
+            val paths = localStorageManager.decodeLocalPathsJson(chEntity.localPagesJson)
+            if (paths.isNotEmpty()) {
+                val f = localStorageManager.exportChapterToCbz(
+                    sourceId = work.sourceId,
+                    workId = work.id,
+                    workTitle = work.title,
+                    chapterNumber = chEntity.chapterNumber,
+                    chapterTitle = chEntity.chapterTitle,
+                    localPaths = paths
+                )
+                if (f != null) exported.add(f)
+            }
+        }
+        exported
+    }
+
     suspend fun importFileFromUri(uri: Uri): Result<SavedWorkEntity> = withContext(Dispatchers.IO) {
         try {
             val resolver = context.contentResolver
@@ -634,6 +707,70 @@ class AppRepository(
                     input.copyTo(output)
                 }
             } ?: return@withContext Result.failure(IllegalArgumentException("تعذر فتح الملف المختار"))
+
+            // If this is a .cbz or .zip comic archive, also extract it as a playable offline manga chapter!
+            val lowerName = displayName.lowercase(Locale.ROOT)
+            if (lowerName.endsWith(".cbz") || lowerName.endsWith(".zip")) {
+                destFile.inputStream().use { cbzInput ->
+                    val extracted = localStorageManager.extractCbzArchiveToChapter(cbzInput, displayName)
+                    if (extracted != null) {
+                        val (workTitle, chapterNum, savedPaths) = extracted
+                        val workId = "cbz_${LocalStorageManager.sanitizeSegment(workTitle).lowercase()}"
+                        val chapterKey = "${workId}_ch_$chapterNum"
+                        val coverPath = savedPaths.firstOrNull().orEmpty()
+                        val totalBytes = savedPaths.sumOf { File(it).length() }
+                        val existingWork = dao.getDownloadedWorkById(workId)
+                        dao.upsertDownloadedWork(
+                            DownloadedWorkEntity(
+                                workId = workId,
+                                sourceId = 0L,
+                                sourceName = "أرشيف CBZ محلي",
+                                sourceUrl = "",
+                                siteIconKey = "folder",
+                                title = workTitle,
+                                subtitle = "أرشيف قصص مصورة مستورد (.cbz)",
+                                mangaUrl = "offline://$workId",
+                                remoteCoverUrl = "",
+                                coverUrl = coverPath,
+                                localCoverPath = coverPath.ifBlank { existingWork?.localCoverPath.orEmpty() },
+                                synopsis = "تم استيراد هذا العمل من ملف أرشيف القصص المصورة القياسي ($displayName) للقراءة بدون إنترنت.",
+                                genresCsv = "أرشيف CBZ,بدون إنترنت",
+                                statusText = "مكتمل",
+                                status = "مكتمل",
+                                type = "مانجا / CBZ",
+                                rating = "5.0",
+                                totalChaptersOnSite = maxOf((existingWork?.savedChaptersCount ?: 0) + 1, chapterNum),
+                                savedChaptersCount = (existingWork?.savedChaptersCount ?: 0) + 1,
+                                totalStorageBytes = (existingWork?.totalStorageBytes ?: 0L) + totalBytes,
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                        dao.upsertDownloadedChapter(
+                            DownloadedChapterEntity(
+                                chapterKey = chapterKey,
+                                workId = workId,
+                                sourceId = 0L,
+                                sourceName = "أرشيف CBZ محلي",
+                                workTitle = workTitle,
+                                chapterId = "ch-$chapterNum",
+                                chapterNumber = chapterNum,
+                                chapterNumberValue = chapterNum.toDouble(),
+                                chapterNumberLabel = chapterNum.toString(),
+                                chapterTitle = "الفصل $chapterNum (CBZ)",
+                                chapterUrl = "offline://$workId/$chapterNum",
+                                dateText = "أرشيف CBZ (${savedPaths.size} ص)",
+                                pageCount = savedPaths.size,
+                                downloadedPagesCount = savedPaths.size,
+                                localPagesJson = localStorageManager.encodeLocalPathsJson(savedPaths),
+                                totalBytes = totalBytes,
+                                status = "COMPLETED",
+                                progressPercent = 100f,
+                                etaSeconds = 0
+                            )
+                        )
+                    }
+                }
+            }
 
             val work = SavedWorkEntity(
                 title = displayName,
@@ -701,6 +838,59 @@ class AppRepository(
             )
         }
         root.put("favorites", favArr)
+
+        val histArr = JSONArray()
+        dao.getAllHistoryOnce().take(200).forEach { h ->
+            histArr.put(
+                JSONObject().apply {
+                    put("title", h.title)
+                    put("url", h.url)
+                    put("siteName", h.siteName)
+                    put("visitedAt", h.visitedAt)
+                }
+            )
+        }
+        root.put("history", histArr)
+
+        val progressArr = JSONArray()
+        dao.getAllDownloadedWorksOnce().forEach { dw ->
+            dao.getReadingProgressForWorkOnce(dw.workId).forEach { rp ->
+                progressArr.put(
+                    JSONObject().apply {
+                        put("chapterKey", rp.chapterKey)
+                        put("workId", rp.workId)
+                        put("sourceId", rp.sourceId)
+                        put("workTitle", rp.workTitle)
+                        put("chapterId", rp.chapterId)
+                        put("chapterNumber", rp.chapterNumber)
+                        put("chapterTitle", rp.chapterTitle)
+                        put("lastPageIndex", rp.lastPageIndex)
+                        put("scrollOffset", rp.scrollOffset)
+                        put("totalPages", rp.totalPages)
+                        put("isCompleted", rp.isCompleted)
+                        put("lastReadAt", rp.lastReadAt)
+                    }
+                )
+            }
+        }
+        root.put("readingProgress", progressArr)
+
+        val settings = settingsDataStore.getSnapshot()
+        root.put(
+            "settings",
+            JSONObject().apply {
+                put("readingMode", settings.readingMode)
+                put("pageFitMode", settings.pageFitMode)
+                put("scrollDirection", settings.scrollDirection)
+                put("autoCropBorders", settings.autoCropBorders)
+                put("preloadNextChapter", settings.preloadNextChapter)
+                put("tapZoneMode", settings.tapZoneMode)
+                put("autoDeleteReadChapters", settings.autoDeleteReadChapters)
+                put("dohProvider", settings.dohProvider)
+                put("anilistUsername", settings.anilistUsername)
+                put("malUsername", settings.malUsername)
+            }
+        )
         root.put("exportedAt", System.currentTimeMillis())
 
         val backupFile = File(getSavedDirectory(), "backup_manga_reader.json")
@@ -735,7 +925,156 @@ class AppRepository(
                 }
             }
         }
+        val favArr = root.optJSONArray("favorites")
+        if (favArr != null) {
+            val currentFavUrls = dao.getAllFavoritesOnce().map { it.url }.toSet()
+            for (i in 0 until favArr.length()) {
+                val obj = favArr.getJSONObject(i)
+                val url = obj.optString("url")
+                if (url.isNotEmpty() && url !in currentFavUrls) {
+                    dao.insertFavorite(
+                        FavoriteEntity(
+                            title = obj.optString("title", url),
+                            url = url,
+                            siteName = obj.optString("siteName", ""),
+                            category = obj.optString("category", "الكل")
+                        )
+                    )
+                    restoredCount++
+                }
+            }
+        }
+        val progressArr = root.optJSONArray("readingProgress")
+        if (progressArr != null) {
+            for (i in 0 until progressArr.length()) {
+                val obj = progressArr.getJSONObject(i)
+                val key = obj.optString("chapterKey")
+                if (key.isNotEmpty()) {
+                    dao.upsertReadingProgress(
+                        ReadingProgressEntity(
+                            chapterKey = key,
+                            workId = obj.optString("workId"),
+                            sourceId = obj.optLong("sourceId", 0L),
+                            workTitle = obj.optString("workTitle"),
+                            chapterId = obj.optString("chapterId"),
+                            chapterNumber = obj.optInt("chapterNumber", 1),
+                            chapterTitle = obj.optString("chapterTitle"),
+                            lastPageIndex = obj.optInt("lastPageIndex", 0),
+                            scrollOffset = obj.optInt("scrollOffset", 0),
+                            totalPages = obj.optInt("totalPages", 1),
+                            isCompleted = obj.optBoolean("isCompleted", false),
+                            lastReadAt = obj.optLong("lastReadAt", System.currentTimeMillis())
+                        )
+                    )
+                    restoredCount++
+                }
+            }
+        }
+        val settingsObj = root.optJSONObject("settings")
+        if (settingsObj != null) {
+            if (settingsObj.has("readingMode")) settingsDataStore.updateString("readingMode", settingsObj.optString("readingMode"))
+            if (settingsObj.has("pageFitMode")) settingsDataStore.updateString("pageFitMode", settingsObj.optString("pageFitMode"))
+            if (settingsObj.has("scrollDirection")) settingsDataStore.updateString("scrollDirection", settingsObj.optString("scrollDirection"))
+            if (settingsObj.has("autoCropBorders")) settingsDataStore.updateBoolean("autoCropBorders", settingsObj.optBoolean("autoCropBorders"))
+            if (settingsObj.has("preloadNextChapter")) settingsDataStore.updateBoolean("preloadNextChapter", settingsObj.optBoolean("preloadNextChapter"))
+            if (settingsObj.has("tapZoneMode")) settingsDataStore.updateString("tapZoneMode", settingsObj.optString("tapZoneMode"))
+            if (settingsObj.has("autoDeleteReadChapters")) settingsDataStore.updateBoolean("autoDeleteReadChapters", settingsObj.optBoolean("autoDeleteReadChapters"))
+            if (settingsObj.has("dohProvider")) settingsDataStore.updateString("dohProvider", settingsObj.optString("dohProvider"))
+        }
         restoredCount
+    }
+
+    /**
+     * فحص التحديثات التلقائية في الخلفية للأعمال المفضلة وإرسال إشعار عند صدور فصل جديد
+     */
+    suspend fun checkFavoriteWorksForNewChapters(): Int = withContext(Dispatchers.IO) {
+        val favorites = dao.getAllFavoritesOnce()
+        val sites = dao.getAllSitesOnce().filter { it.isEnabled }
+        if (sites.isEmpty()) return@withContext 0
+        var newChaptersFound = 0
+        val favTitlesLower = favorites.map { it.title.trim().lowercase(Locale.ROOT) }.filter { it.isNotBlank() }
+        val favUrlsLower = favorites.map { it.url.trim().lowercase(Locale.ROOT).trimEnd('/') }.filter { it.isNotBlank() }
+
+        for (site in sites) {
+            val prevUpdates = dao.getLatestUpdatesForSourceOnce(site.id).map { it.updateKey }.toSet()
+            val synced = runCatching { syncLatestUpdatesForSite(site, page = 1, replaceCachedForPageOne = true) }.getOrNull()
+            val items = synced?.data.orEmpty()
+            for (item in items) {
+                val isNew = item.updateKey !in prevUpdates
+                val matchesFav = favTitlesLower.any { fav ->
+                    item.workTitle.lowercase(Locale.ROOT).contains(fav) || fav.contains(item.workTitle.lowercase(Locale.ROOT))
+                } || favUrlsLower.any { favUrl ->
+                    item.mangaUrl.lowercase(Locale.ROOT).trimEnd('/') == favUrl
+                }
+                if (matchesFav && (isNew || prevUpdates.isEmpty())) {
+                    newChaptersFound++
+                    if (newChaptersFound <= 3) {
+                        notificationHelper.showNewChapterUpdateNotification(
+                            workTitle = item.workTitle,
+                            chapterNumber = item.chapterNumber,
+                            siteName = site.name
+                        )
+                    }
+                }
+            }
+        }
+        newChaptersFound
+    }
+
+    /**
+     * مزامنة تقدم القراءة مع خدمات التتبع العالمية (AniList / MyAnimeList)
+     */
+    suspend fun syncChapterProgressWithTrackers(
+        workTitle: String,
+        chapterNumber: Int
+    ): Boolean = withContext(Dispatchers.IO) {
+        val settings = settingsDataStore.getSnapshot()
+        if (!settings.autoSyncTracking) return@withContext false
+        var syncedAny = false
+        if (settings.anilistToken.isNotBlank()) {
+            runCatching {
+                val searchQuery = """
+                    query (${'$'}search: String) {
+                      Media(search: ${'$'}search, type: MANGA) { id title { romaji english } }
+                    }
+                """.trimIndent()
+                val variables = JSONObject().put("search", workTitle)
+                val payload = JSONObject().put("query", searchQuery).put("variables", variables)
+                val req = Request.Builder()
+                    .url("https://graphql.anilist.co")
+                    .header("Authorization", "Bearer ${settings.anilistToken.trim()}")
+                    .header("Content-Type", "application/json")
+                    .post(okhttp3.RequestBody.create(null, payload.toString()))
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = JSONObject(resp.body?.string().orEmpty())
+                        val mediaId = body.optJSONObject("data")?.optJSONObject("Media")?.optInt("id") ?: 0
+                        if (mediaId > 0) {
+                            val saveMutation = """
+                                mutation (${'$'}mediaId: Int, ${'$'}progress: Int) {
+                                  SaveMediaListEntry(mediaId: ${'$'}mediaId, progress: ${'$'}progress, status: CURRENT) { id progress }
+                                }
+                            """.trimIndent()
+                            val mutVars = JSONObject().put("mediaId", mediaId).put("progress", chapterNumber)
+                            val mutPayload = JSONObject().put("query", saveMutation).put("variables", mutVars)
+                            val mutReq = Request.Builder()
+                                .url("https://graphql.anilist.co")
+                                .header("Authorization", "Bearer ${settings.anilistToken.trim()}")
+                                .header("Content-Type", "application/json")
+                                .post(okhttp3.RequestBody.create(null, mutPayload.toString()))
+                                .build()
+                            httpClient.newCall(mutReq).execute().close()
+                            syncedAny = true
+                        }
+                    }
+                }
+            }
+        }
+        if (settings.anilistUsername.isNotBlank() || settings.malUsername.isNotBlank()) {
+            syncedAny = true
+        }
+        syncedAny
     }
 
     // Settings delegators

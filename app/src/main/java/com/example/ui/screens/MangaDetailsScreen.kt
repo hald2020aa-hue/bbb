@@ -115,6 +115,15 @@ fun MangaDetailsScreen(
     readChapterNumbers: Set<Int> = emptySet(),
     resumeLabel: String = "",
     addedSites: List<SiteEntity> = emptyList(),
+    categories: List<String> = listOf("أقرأها حالياً", "مكتملة", "مؤجلة", "أرغب بقراءتها"),
+    currentCategory: String = "أقرأها حالياً",
+    onAssignCategory: (MangaWork, String) -> Unit = { _, _ -> },
+    onExportChapterCbz: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
+    onExportAllCbz: (MangaWork) -> Unit = {},
+    isSearchingMigration: Boolean = false,
+    migrationCandidates: List<MangaWork> = emptyList(),
+    onFindMigrationCandidates: (MangaWork) -> Unit = {},
+    onMigrateToWork: (MangaWork, MangaWork) -> Unit = { _, _ -> },
     onBackClick: () -> Unit,
     onOpenChapter: (MangaWork, MangaChapter) -> Unit,
     onToggleFavorite: (MangaWork) -> Unit,
@@ -135,8 +144,6 @@ fun MangaDetailsScreen(
     var isLoadingChapters by remember(work.id, work.mangaUrl, work.isFromLocalStorage) {
         mutableStateOf(!work.isFromLocalStorage && work.chapters.isEmpty())
     }
-    var requiresCloudflare by remember(work.id, work.mangaUrl) { mutableStateOf(false) }
-    var showProtectionModal by remember { mutableStateOf(false) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
 
     var isChaptersReversed by remember { mutableStateOf(false) }
@@ -144,6 +151,8 @@ fun MangaDetailsScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showSearchInSitesDialog by remember { mutableStateOf(false) }
     var showDownloadMangaDialog by remember { mutableStateOf(false) }
+    var showCategoryDialog by remember { mutableStateOf(false) }
+    var showMigrationDialog by remember { mutableStateOf(false) }
     var bottomActionHint by remember { mutableStateOf<String?>(null) }
 
     val targetMangaUrl = remember(work.mangaUrl, work.siteUrl, work.id) {
@@ -183,10 +192,6 @@ fun MangaDetailsScreen(
                 storageSizeBytes = liveWork.storageSizeBytes,
                 chapters = if (mergedChs.isNotEmpty()) mergedChs else liveWork.chapters
             )
-            requiresCloudflare = false
-            isLoadingChapters = false
-        } else if (res.requiresCloudflare && liveWork.chapters.isEmpty()) {
-            requiresCloudflare = true
             isLoadingChapters = false
         } else {
             delay(1300)
@@ -208,10 +213,6 @@ fun MangaDetailsScreen(
                         isFromLocalStorage = liveWork.isFromLocalStorage,
                         storageSizeBytes = liveWork.storageSizeBytes
                     )
-                    requiresCloudflare = false
-                    isLoadingChapters = false
-                } else if (domRes.requiresCloudflare && liveWork.chapters.isEmpty()) {
-                    requiresCloudflare = true
                     isLoadingChapters = false
                 }
             }
@@ -433,7 +434,7 @@ fun MangaDetailsScreen(
 
                             IconButton(
                                 onClick = {
-                                    showProtectionModal = true
+                                    onOpenInWebView(targetMangaUrl, liveWork.title)
                                 },
                                 modifier = Modifier
                                     .size(32.dp)
@@ -441,8 +442,8 @@ fun MangaDetailsScreen(
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Public,
-                                    contentDescription = "فتح الموقع / الحماية",
-                                    tint = if (requiresCloudflare) Color(0xFFFFB74D) else Color(0xFF9EA4B8),
+                                    contentDescription = "فتح الموقع",
+                                    tint = Color(0xFF9EA4B8),
                                     modifier = Modifier.size(19.dp)
                                 )
                             }
@@ -720,34 +721,20 @@ fun MangaDetailsScreen(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Security,
+                            imageVector = Icons.Default.Refresh,
                             contentDescription = null,
                             tint = PeriwinklePrimary,
                             modifier = Modifier.size(42.dp)
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = if (requiresCloudflare) {
-                                "يتطلب الموقع تخطي حماية Cloudflare لإظهار الفصول"
-                            } else {
-                                "لم يتم استخراج الفصول تلقائياً بعد"
-                            },
+                            text = "لم يتم استخراج الفصول تلقائياً بعد",
                             color = TextPrimaryWhite,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center
                         )
                         Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = { showProtectionModal = true },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = PeriwinklePrimary,
-                                contentColor = PeriwinkleOnPrimary
-                            )
-                        ) {
-                            Text("فتح الحماية وجلب الفصول", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
                         OutlinedButton(onClick = { refreshTrigger++ }) {
                             Text("إعادة المحاولة", color = TextPrimaryWhite, fontSize = 12.sp)
                         }
@@ -991,6 +978,22 @@ fun MangaDetailsScreen(
                                             )
                                         }
                                     )
+                                    if (isSaved) {
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = "تصدير الفصل بصيغة .cbz",
+                                                    color = PeriwinklePrimary,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            },
+                                            onClick = {
+                                                activeChapterMenuId = null
+                                                onExportChapterCbz(liveWork, chapter)
+                                            }
+                                        )
+                                    }
                                     if (isSaved || isIncomplete) {
                                         DropdownMenuItem(
                                             text = {
@@ -1308,22 +1311,53 @@ fun MangaDetailsScreen(
                                     }
                                 }
                             )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "فئة المكتبة ($currentCategory)",
+                                        color = PeriwinklePrimary,
+                                        fontSize = 14.sp,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        textAlign = TextAlign.End
+                                    )
+                                },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    showCategoryDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "نقل العمل لمصدر آخر (Migration)",
+                                        color = PeriwinklePrimary,
+                                        fontSize = 14.sp,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        textAlign = TextAlign.End
+                                    )
+                                },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    onFindMigrationCandidates(liveWork)
+                                    showMigrationDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "تصدير الفصول بصيغة .cbz",
+                                        color = TextPrimaryWhite,
+                                        fontSize = 14.sp,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        textAlign = TextAlign.End
+                                    )
+                                },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    onExportAllCbz(liveWork)
+                                }
+                            )
                             if (liveWork.isFromLocalStorage) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "تصدير",
-                                            color = TextPrimaryWhite,
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.fillMaxWidth(),
-                                            textAlign = TextAlign.End
-                                        )
-                                    },
-                                    onClick = {
-                                        showOverflowMenu = false
-                                        onShowToast("تم تصدير نسخة من الفصول المحفوظة")
-                                    }
-                                )
                                 DropdownMenuItem(
                                     text = {
                                         Text(
@@ -1363,58 +1397,212 @@ fun MangaDetailsScreen(
         }
     }
 
-    // Dialog for Save / Download Manga or Chapters ("حفظ" button at 00:33 & 07:03)
+    // Advanced Batch Download Dialog ("حفظ" button at 00:33 & 07:03 + Batch Download Options)
     if (showDownloadMangaDialog) {
         val totalCh = liveWork.chapters.size.coerceAtLeast(1)
+        val sortedAsc = remember(liveWork.chapters) { liveWork.chapters.sortedBy { it.number } }
+        val unreadChapters = remember(sortedAsc, readChapterNumbers) {
+            sortedAsc.filter { it.number !in readChapterNumbers && !it.isRead }
+        }
         AlertDialog(
             onDismissRequest = { showDownloadMangaDialog = false },
             containerColor = AppDialogSurface,
             title = {
-                Text("حفظ المانجا", color = TextPrimaryWhite, fontWeight = FontWeight.Bold)
+                Text("حفظ وتنزيل الفصول", color = TextPrimaryWhite, fontWeight = FontWeight.Bold)
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "سيتم حفظ المانجا (جميع $totalCh الفصول).",
+                        text = "اختر طريقة التنزيل الدفعي للعمل (${liveWork.title} — $totalCh فصل):",
                         color = TextPrimaryWhite,
-                        fontSize = 14.sp
+                        fontSize = 13.sp
                     )
-                    if (liveWork.chapters.size > 1) {
-                        OutlinedButton(
-                            onClick = {
-                                showDownloadMangaDialog = false
-                                val firstFive = liveWork.chapters.take(5)
-                                onDownloadChapters(liveWork, firstFive, "بدأ التنزيل 😭")
-                            },
-                            modifier = Modifier.fillMaxWidth()
+                    OutlinedButton(
+                        onClick = {
+                            showDownloadMangaDialog = false
+                            val target = unreadChapters.ifEmpty { sortedAsc }
+                            onDownloadChapters(liveWork, target, "بدأ تنزيل الفصول غير المقروءة (${target.size} فصل) 😭")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("batch_download_unread_btn")
+                    ) {
+                        Text("تنزيل الفصول غير المقروءة (${unreadChapters.size})", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showDownloadMangaDialog = false
+                            val firstFive = sortedAsc.take(5)
+                            onDownloadChapters(liveWork, firstFive, "بدأ تنزيل أول 5 فصول 😭")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("batch_download_first_5_btn")
+                    ) {
+                        Text("تنزيل أول 5 فصول", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showDownloadMangaDialog = false
+                            val firstTen = sortedAsc.take(10)
+                            onDownloadChapters(liveWork, firstTen, "بدأ تنزيل أول 10 فصول 😭")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("batch_download_first_10_btn")
+                    ) {
+                        Text("تنزيل أول 10 فصول", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = {
+                            showDownloadMangaDialog = false
+                            if (liveWork.chapters.isNotEmpty()) {
+                                onDownloadChapters(liveWork, sortedAsc, "بدأ تنزيل جميع الفصول ($totalCh) 😭")
+                            } else {
+                                onSaveWorkToStorage(liveWork)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PeriwinklePrimary,
+                            contentColor = PeriwinkleOnPrimary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("details_confirm_save_all_btn")
+                    ) {
+                        Text("تحميل الكل ($totalCh فصل)", fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showDownloadMangaDialog = false }) {
+                    Text("إلغاء", color = PeriwinklePrimary)
+                }
+            }
+        )
+    }
+
+    // Custom Library Category Selector Dialog
+    if (showCategoryDialog) {
+        AlertDialog(
+            onDismissRequest = { showCategoryDialog = false },
+            containerColor = AppDialogSurface,
+            title = {
+                Text("تصنيف العمل في المكتبة", color = TextPrimaryWhite, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    categories.forEach { catName ->
+                        val isSelected = catName == currentCategory
+                        Surface(
+                            color = if (isSelected) PeriwinklePrimary.copy(alpha = 0.22f) else Color(0xFF232733),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, if (isSelected) PeriwinklePrimary else Color(0xFF343A4A)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showCategoryDialog = false
+                                    onAssignCategory(liveWork, catName)
+                                }
                         ) {
-                            Text("تنزيل أول 5 فصول فقط", color = PeriwinklePrimary)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = catName,
+                                    color = if (isSelected) PeriwinklePrimary else TextPrimaryWhite,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (isSelected) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = PeriwinklePrimary)
+                                }
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDownloadMangaDialog = false
-                        if (liveWork.chapters.isNotEmpty()) {
-                            onDownloadChapters(
-                                liveWork,
-                                liveWork.chapters,
-                                "بدأ التنزيل 😭"
-                            )
-                        } else {
-                            onSaveWorkToStorage(liveWork)
+                TextButton(onClick = { showCategoryDialog = false }) {
+                    Text("إغلاق", color = PeriwinklePrimary)
+                }
+            }
+        )
+    }
+
+    // Source Migration Dialog ("نقل العمل لمصدر آخر مع الاحتفاظ بسجل الفصول المقروءة")
+    if (showMigrationDialog) {
+        AlertDialog(
+            onDismissRequest = { showMigrationDialog = false },
+            containerColor = AppDialogSurface,
+            title = {
+                Text("نقل العمل لمصدر آخر", color = TextPrimaryWhite, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "سيتم نقل «${liveWork.title}» إلى المصدر المختار مع الاحتفاظ بجميع الفصول المقروءة (${readChapterNumbers.size} فصل) وتقدم القراءة:",
+                        color = TextSecondaryGrey,
+                        fontSize = 12.sp
+                    )
+                    if (isSearchingMigration) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 16.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(color = PeriwinklePrimary, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("جارٍ البحث في المصادر المفعلة...", color = TextPrimaryWhite, fontSize = 13.sp)
                         }
-                    },
-                    modifier = Modifier.testTag("details_confirm_save_all_btn")
-                ) {
-                    Text("حسنا", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                    } else if (migrationCandidates.isEmpty()) {
+                        Text(
+                            text = "لم يتم العثور على عمل مطابق في المصادر الأخرى المفعلة حالياً.",
+                            color = Color(0xFFFFB74D),
+                            fontSize = 13.sp
+                        )
+                    } else {
+                        migrationCandidates.take(6).forEach { candidate ->
+                            Surface(
+                                color = Color(0xFF232733),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        showMigrationDialog = false
+                                        onMigrateToWork(liveWork, candidate)
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    MangaCoverArtwork(
+                                        work = candidate,
+                                        modifier = Modifier
+                                            .width(42.dp)
+                                            .height(58.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(candidate.title, color = TextPrimaryWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                        Text(candidate.siteName, color = PeriwinklePrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    Text("نقل", color = PeriwinklePrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { showDownloadMangaDialog = false }) {
-                    Text("إلغاء", color = PeriwinklePrimary)
+            confirmButton = {
+                TextButton(onClick = { showMigrationDialog = false }) {
+                    Text("إغلاق", color = PeriwinklePrimary)
                 }
             }
         )
@@ -1438,10 +1626,20 @@ fun MangaDetailsScreen(
                         )
                     } else {
                         Text(
-                            text = "اختر موقعاً للبحث عن «${liveWork.title}»:",
+                            text = "اختر موقعاً للبحث عن «${liveWork.title}» أو نقل العمل إليه:",
                             color = TextSecondaryGrey,
                             fontSize = 13.sp
                         )
+                        OutlinedButton(
+                            onClick = {
+                                showSearchInSitesDialog = false
+                                onFindMigrationCandidates(liveWork)
+                                showMigrationDialog = true
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("بحث تلقائي ونقل العمل مع الفصول المقروءة", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                        }
                         addedSites.forEach { s ->
                             Surface(
                                 color = Color(0xFF232733),
@@ -1473,27 +1671,6 @@ fun MangaDetailsScreen(
                 TextButton(onClick = { showSearchInSitesDialog = false }) {
                     Text("إغلاق", color = PeriwinklePrimary)
                 }
-            }
-        )
-    }
-
-    // Interactive Cloudflare Protection & Live DOM Extraction Modal
-    if (showProtectionModal) {
-        CloudflareProtectionDialog(
-            url = targetMangaUrl,
-            siteName = liveWork.siteName,
-            jsExtractorScript = LiveMangaSiteScraper.JS_EXTRACT_DETAILS,
-            onExtractedDomJson = { rawJson ->
-                val domRes = LiveMangaSiteScraper.parseDetailsFromDomJson(rawJson, liveWork)
-                if (domRes.work.chapters.isNotEmpty() || domRes.work.description.isNotBlank()) {
-                    liveWork = domRes.work
-                    requiresCloudflare = false
-                    isLoadingChapters = false
-                }
-            },
-            onDismissAndRefresh = {
-                showProtectionModal = false
-                refreshTrigger++
             }
         )
     }

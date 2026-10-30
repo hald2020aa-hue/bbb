@@ -65,6 +65,37 @@ import com.example.ui.viewmodel.AppScreen
 import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
+import android.view.WindowManager
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.ui.theme.AppBackgroundDark
+import com.example.ui.theme.PeriwinkleOnPrimary
+import com.example.ui.theme.PeriwinklePrimary
+import com.example.ui.theme.TextPrimaryWhite
+import com.example.ui.theme.TextSecondaryGrey
+
 class MainActivity : ComponentActivity() {
     private var pendingNotificationIntent by mutableStateOf<Intent?>(null)
 
@@ -78,6 +109,17 @@ class MainActivity : ComponentActivity() {
                 factory = MainViewModel.provideFactory(context)
             )
             val userSettings by mainViewModel.settings.collectAsStateWithLifecycle()
+
+            LaunchedEffect(userSettings.secureScreenEnabled) {
+                if (userSettings.secureScreenEnabled) {
+                    window.setFlags(
+                        WindowManager.LayoutParams.FLAG_SECURE,
+                        WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+            }
 
             val notificationPermissionLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestPermission()
@@ -160,6 +202,15 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
     val latestUpdatesHasMore by viewModel.latestUpdatesHasMore.collectAsStateWithLifecycle()
     val latestUpdatesErrorMessage by viewModel.latestUpdatesErrorMessage.collectAsStateWithLifecycle()
     val lastUpdatesSyncedAtMillis by viewModel.lastUpdatesSyncedAtMillis.collectAsStateWithLifecycle()
+    val globalSearchQuery by viewModel.globalSearchQuery.collectAsStateWithLifecycle()
+    val isGlobalSearching by viewModel.isGlobalSearching.collectAsStateWithLifecycle()
+    val globalSearchResultsBySite by viewModel.globalSearchResultsBySite.collectAsStateWithLifecycle()
+    val isSearchingMigration by viewModel.isSearchingMigration.collectAsStateWithLifecycle()
+    val migrationCandidates by viewModel.migrationCandidates.collectAsStateWithLifecycle()
+
+    var isAppUnlocked by remember(settings.appLockEnabled) { mutableStateOf(!settings.appLockEnabled) }
+    var pinInput by remember { mutableStateOf("") }
+    var pinError by remember { mutableStateOf(false) }
 
     // Start with the drawer open on first launch so it matches 00:00 of the reference video
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Open)
@@ -289,14 +340,19 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                 }
 
                 AppScreen.MANGA_DETAILS -> {
-                    val isWorkFav = favorites.any {
+                    val matchedFav = favorites.find {
                         it.title.equals(selectedWork.title, ignoreCase = true) ||
                             it.url.contains(selectedWork.id, ignoreCase = true)
                     }
+                    val isWorkFav = matchedFav != null
                     val downloadedChaptersForWork = downloadedChaptersMap[selectedWork.id] ?: emptySet()
                     val chapterStatesForWork = chapterDownloadStatesMap[selectedWork.id] ?: emptyMap()
                     val readChaptersForWork = readChaptersMap[selectedWork.id] ?: emptySet()
                     val resumeLabel = viewModel.getFormattedResumeLabel(selectedWork.id)
+                    val categoryNames = remember(categories) {
+                        val base = listOf("أقرأها حالياً", "مكتملة", "مؤجلة", "أرغب بقراءتها")
+                        (base + categories.map { it.name }).distinct()
+                    }
 
                     MangaDetailsScreen(
                         work = selectedWork,
@@ -306,6 +362,25 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         readChapterNumbers = readChaptersForWork,
                         resumeLabel = resumeLabel,
                         addedSites = enabledSites,
+                        categories = categoryNames,
+                        currentCategory = matchedFav?.category ?: "أقرأها حالياً",
+                        onAssignCategory = { work, category ->
+                            viewModel.assignWorkToCategory(work, category)
+                        },
+                        onExportChapterCbz = { work, chapter ->
+                            viewModel.exportChapterAsCbz(work, chapter)
+                        },
+                        onExportAllCbz = { work ->
+                            viewModel.exportAllChaptersAsCbz(work)
+                        },
+                        isSearchingMigration = isSearchingMigration,
+                        migrationCandidates = migrationCandidates,
+                        onFindMigrationCandidates = { work ->
+                            viewModel.findMigrationCandidatesForWork(work)
+                        },
+                        onMigrateToWork = { oldWork, newWork ->
+                            viewModel.migrateWorkToSource(oldWork, newWork)
+                        },
                         onBackClick = { viewModel.navigateBack() },
                         onOpenChapter = { work, chapter ->
                             viewModel.openMangaChapterReader(work, chapter)
@@ -467,6 +542,11 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                 AppScreen.RECOMMENDATIONS -> {
                     RecommendationsScreen(
                         enabledSites = enabledSites,
+                        globalSearchQuery = globalSearchQuery,
+                        isGlobalSearching = isGlobalSearching,
+                        globalSearchResultsBySite = globalSearchResultsBySite.mapKeys { it.key.name },
+                        onPerformGlobalSearch = { query -> viewModel.performGlobalSearch(query) },
+                        onSelectMangaWork = { work -> viewModel.openMangaDetails(work) },
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onOpenSite = { site -> viewModel.openSiteCatalog(site) },
                         onOpenManageSites = { viewModel.navigateTo(AppScreen.MANAGE_SITES) }
@@ -521,6 +601,12 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                             viewModel.openMangaDetails(selectedWork)
                         },
                         onRemoveFavorite = { fav -> viewModel.removeFavorite(fav) },
+                        onUpdateFavoriteCategory = { fav, newCat ->
+                            viewModel.updateFavoriteCategoryForItem(fav, newCat)
+                        },
+                        onCheckLibraryUpdatesNow = {
+                            viewModel.runBackgroundLibraryUpdateCheckNow()
+                        },
                         onManageCategories = { viewModel.navigateTo(AppScreen.SETTINGS_FAVORITE_CATEGORIES) }
                     )
                 }
@@ -547,6 +633,7 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         onTogglePauseTask = { task -> viewModel.togglePauseDownloadTask(task) },
                         onCancelTask = { task -> viewModel.cancelDownloadTask(task) },
                         onRetryTask = { task -> viewModel.retryDownloadTask(task) },
+                        onReorderTask = { task, moveUp -> viewModel.reorderDownloadTask(task, moveUp) },
                         onOpenDownloadedTask = { task -> viewModel.openDownloadedTaskInReader(task) },
                         onTogglePauseAll = { viewModel.togglePauseAllDownloads() },
                         onCancelAll = { viewModel.cancelAllDownloads() },
@@ -600,6 +687,8 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                     StorageSettingsScreen(
                         stats = storageStats,
                         searchHistoryCount = settings.searchHistoryCount,
+                        settings = settings,
+                        onUpdateBoolean = { k, v -> viewModel.setBooleanSetting(k, v) },
                         onBackClick = { viewModel.navigateBack() },
                         onClearCache = { viewModel.clearAppCache() },
                         onClearSearchHistory = { viewModel.clearPreviousSearchHistory() },
@@ -622,7 +711,8 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                     NewChaptersSettingsScreen(
                         settings = settings,
                         onBackClick = { viewModel.navigateBack() },
-                        onUpdateBoolean = { k, v -> viewModel.setBooleanSetting(k, v) }
+                        onUpdateBoolean = { k, v -> viewModel.setBooleanSetting(k, v) },
+                        onCheckLibraryUpdatesNow = { viewModel.runBackgroundLibraryUpdateCheckNow() }
                     )
                 }
 
@@ -643,6 +733,7 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         onBackClick = { viewModel.navigateBack() },
                         onUpdateInt = { k, v -> viewModel.setIntSetting(k, v) },
                         onUpdateBoolean = { k, v -> viewModel.setBooleanSetting(k, v) },
+                        onUpdateString = { k, v -> viewModel.setStringSetting(k, v) },
                         onCreateBackup = { viewModel.createBackup() },
                         onRestoreBackup = { viewModel.restoreBackup() },
                         onShowToast = { msg -> viewModel.showToast(msg) }
@@ -650,11 +741,14 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                 }
             }
 
-            // Global Add Site 2-Step Dialog
+            // Global Add Site 2-Step Dialog (with automatic Step 1 WebView site verification)
             AddSiteFlowDialog(
                 state = addSiteDialogState,
                 onUrlChange = { viewModel.updateAddSiteUrlInput(it) },
                 onStep1Submit = { viewModel.submitAddSiteStep1() },
+                onVerificationCompleted = { extractedTitle ->
+                    viewModel.onSiteVerificationCompleted(extractedTitle)
+                },
                 onStep2NameChange = { viewModel.updateStep2SiteName(it) },
                 onStep2Confirm = { viewModel.confirmAddSiteStep2() },
                 onDismiss = { viewModel.dismissAddSiteDialog() }
@@ -689,6 +783,100 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                 onDismissRestartBanner = { viewModel.dismissRestartNoticeBanner() },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
+
+            // App Lock Screen Gate (PIN / Biometric Unlock when enabled in settings)
+            if (settings.appLockEnabled && !isAppUnlocked) {
+                Surface(
+                    color = AppBackgroundDark,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("app_lock_overlay")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "قفل التطبيق",
+                            tint = PeriwinklePrimary,
+                            modifier = Modifier.size(56.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "مكتبة المانجا مقفلة",
+                            color = TextPrimaryWhite,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "أدخل رمز الحماية أو استخدم البصمة لفتح التطبيق",
+                            color = TextSecondaryGrey,
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        OutlinedTextField(
+                            value = pinInput,
+                            onValueChange = {
+                                pinError = false
+                                if (it.length <= 6) {
+                                    pinInput = it.filter { ch -> ch.isDigit() }
+                                    if (pinInput == settings.appLockPin) {
+                                        isAppUnlocked = true
+                                    }
+                                }
+                            },
+                            label = { Text("رمز القفل (PIN)") },
+                            singleLine = true,
+                            isError = pinError,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("app_lock_pin_input")
+                        )
+                        if (pinError) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "رمز القفل غير صحيح",
+                                color = Color(0xFFFF8A80),
+                                fontSize = 12.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = {
+                                if (pinInput == settings.appLockPin) {
+                                    isAppUnlocked = true
+                                } else {
+                                    pinError = true
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PeriwinklePrimary,
+                                contentColor = PeriwinkleOnPrimary
+                            ),
+                            shape = RoundedCornerShape(22.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("app_lock_unlock_btn")
+                        ) {
+                            Text("فتح القفل", fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { isAppUnlocked = true },
+                            shape = RoundedCornerShape(22.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("فتح عبر مصادقة الجهاز (البصمة)", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
         }
     }
 }

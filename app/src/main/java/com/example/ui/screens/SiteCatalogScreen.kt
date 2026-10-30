@@ -118,7 +118,7 @@ fun SiteCatalogScreen(
     var showSearchBar by remember { mutableStateOf(false) }
     var selectedGenre by remember { mutableStateOf<String?>(null) }
     var selectedStatusFilter by remember { mutableStateOf<String?>(null) }
-    var sortMode by remember { mutableStateOf("آخر الاضافات") }
+    var sortMode by remember { mutableStateOf("الأحدث") }
     var showSortMenu by remember { mutableStateOf(false) }
     var showFilterSheetDialog by remember { mutableStateOf(false) }
     var showProtectionDialog by remember { mutableStateOf(false) }
@@ -341,23 +341,6 @@ fun SiteCatalogScreen(
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
-                            onClick = {
-                                if (activeSectionTab == "UPDATES") {
-                                    siteUpdatesPage = 1
-                                    siteUpdatesRefreshTrigger++
-                                } else {
-                                    refreshTrigger++
-                                }
-                            },
-                            modifier = Modifier.testTag("site_catalog_refresh_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "تحديث",
-                                tint = TextPrimaryWhite
-                            )
-                        }
-                        IconButton(
                             onClick = { showSearchBar = true },
                             modifier = Modifier.testTag("site_catalog_search_button")
                         ) {
@@ -365,16 +348,6 @@ fun SiteCatalogScreen(
                                 imageVector = Icons.Default.Search,
                                 contentDescription = "بحث",
                                 tint = TextPrimaryWhite
-                            )
-                        }
-                        IconButton(
-                            onClick = { showProtectionDialog = true },
-                            modifier = Modifier.testTag("site_protection_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Security,
-                                contentDescription = "الحماية وتخطي Cloudflare",
-                                tint = if (requiresCloudflare) Color(0xFFFFB74D) else PeriwinklePrimary
                             )
                         }
                         Box {
@@ -397,6 +370,32 @@ fun SiteCatalogScreen(
                                 containerColor = AppDialogSurface
                             ) {
                                 if (!showViewModeSubMenu) {
+                                    DropdownMenuItem(
+                                        text = { Text("تحديث الصفحة", color = TextPrimaryWhite) },
+                                        leadingIcon = { Icon(Icons.Default.Refresh, null, tint = PeriwinklePrimary) },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            if (activeSectionTab == "UPDATES") {
+                                                siteUpdatesPage = 1
+                                                siteUpdatesRefreshTrigger++
+                                            } else {
+                                                refreshTrigger++
+                                            }
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                if (activeSectionTab == "UPDATES") "عرض الكتالوج والأقسام" else "آخر التحديثات",
+                                                color = TextPrimaryWhite
+                                            )
+                                        },
+                                        leadingIcon = { Icon(Icons.Default.Apps, null, tint = PeriwinklePrimary) },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            activeSectionTab = if (activeSectionTab == "UPDATES") "CATALOG" else "UPDATES"
+                                        }
+                                    )
                                     DropdownMenuItem(
                                         text = { Text("نمط العرض", color = TextPrimaryWhite) },
                                         leadingIcon = { Icon(Icons.Default.GridView, null, tint = PeriwinklePrimary) },
@@ -499,60 +498,12 @@ fun SiteCatalogScreen(
                             fontWeight = FontWeight.SemiBold
                         )
                     }
-                }
-            }
-
-            // Section Mode Selector: "الأعمال والكتالوج" vs "آخر التحديثات من المصدر"
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val isCatalogSelected = activeSectionTab == "CATALOG"
-                val isUpdatesSelected = activeSectionTab == "UPDATES"
-
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = if (isCatalogSelected) PeriwinklePrimary else Color(0xFF1F232E),
-                    border = BorderStroke(1.dp, if (isCatalogSelected) PeriwinklePrimary else Color(0xFF454A59)),
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { activeSectionTab = "CATALOG" }
-                        .testTag("site_tab_catalog")
-                ) {
-                    Box(
-                        modifier = Modifier.padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center
+                } else {
+                    TextButton(
+                        onClick = { activeSectionTab = "CATALOG" },
+                        modifier = Modifier.testTag("site_tab_catalog")
                     ) {
-                        Text(
-                            text = "الأعمال والكتالوج",
-                            color = if (isCatalogSelected) PeriwinkleOnPrimary else TextPrimaryWhite,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = if (isUpdatesSelected) PeriwinklePrimary else Color(0xFF1F232E),
-                    border = BorderStroke(1.dp, if (isUpdatesSelected) PeriwinklePrimary else Color(0xFF454A59)),
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { activeSectionTab = "UPDATES" }
-                        .testTag("site_tab_latest_updates")
-                ) {
-                    Box(
-                        modifier = Modifier.padding(vertical = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "آخر التحديثات",
-                            color = if (isUpdatesSelected) PeriwinkleOnPrimary else TextPrimaryWhite,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text("العودة للكتالوج", color = PeriwinklePrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -756,42 +707,28 @@ fun SiteCatalogScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Icon(
-                            imageVector = if (requiresCloudflare) Icons.Default.Security else Icons.Default.Refresh,
+                            imageVector = Icons.Default.Refresh,
                             contentDescription = null,
                             tint = PeriwinklePrimary,
                             modifier = Modifier.size(54.dp)
                         )
                         Text(
-                            text = if (requiresCloudflare) {
-                                "الموقع محمي بواسطة Cloudflare — اضغط لتفعيل الحماية وجلب المانجا مباشرة"
-                            } else {
-                                errorMessage ?: "جاري جلب قائمة المانجا من الموقع أو لم يتم العثور على نتائج"
-                            },
+                            text = errorMessage ?: "جاري جلب قائمة المانجا من الموقع أو لم يتم العثور على نتائج",
                             color = TextPrimaryWhite,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(
-                                onClick = { showProtectionDialog = true },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = PeriwinklePrimary,
-                                    contentColor = PeriwinkleOnPrimary
-                                )
-                            ) {
-                                Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("تخطي الحماية (Cloudflare)", fontWeight = FontWeight.Bold)
-                            }
-                            OutlinedButton(
-                                onClick = { refreshTrigger++ },
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimaryWhite)
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("إعادة المحاولة")
-                            }
+                        Button(
+                            onClick = { refreshTrigger++ },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PeriwinklePrimary,
+                                contentColor = PeriwinkleOnPrimary
+                            )
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("إعادة المحاولة", fontWeight = FontWeight.Bold)
                         }
                         TextButton(onClick = { onOpenSiteInWebView(site) }) {
                             Icon(Icons.Default.OpenInBrowser, contentDescription = null, tint = PeriwinklePrimary, modifier = Modifier.size(16.dp))
@@ -932,6 +869,17 @@ fun SiteCatalogScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            val genreSub = work.genres.take(2).joinToString("، ")
+                            if (genreSub.isNotBlank() && viewMode != "صغير") {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = genreSub,
+                                    color = TextSecondaryGrey,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }
@@ -1017,7 +965,7 @@ fun SiteCatalogScreen(
     // Exact Filter Sheet Dialog from 01:38-01:43 & 05:56-06:00:
     // الفلتر + مسح التحديد + تصفح حسب + الحالة + التصنيفات
     if (showFilterSheetDialog) {
-        val sortOptions = listOf("آخر الاضافات", "الاكثر مشاهدة", "جديد", "أبجدي", "التقييم", "الشائع")
+        val sortOptions = listOf("الأحدث", "آخر الاضافات", "الاكثر مشاهدة", "أبجدي", "التقييم", "الشائع")
         val statusOptions = listOf("مكتمل", "مستمر", "ملغى", "متوقف")
         AlertDialog(
             onDismissRequest = { showFilterSheetDialog = false },
@@ -1033,7 +981,7 @@ fun SiteCatalogScreen(
                         onClick = {
                             selectedGenre = null
                             selectedStatusFilter = null
-                            sortMode = "آخر الاضافات"
+                            sortMode = "الأحدث"
                         }
                     ) {
                         Text("مسح التحديد", color = TextSecondaryGrey, fontSize = 13.sp)

@@ -67,10 +67,15 @@ import com.example.ui.theme.TextSecondaryGrey
 import com.example.ui.viewmodel.MainViewModel
 import kotlin.math.roundToInt
 
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+
 @Composable
 fun StorageSettingsScreen(
     stats: StorageStats,
     searchHistoryCount: Int,
+    settings: UserSettings = UserSettings(),
+    onUpdateBoolean: (String, Boolean) -> Unit = { _, _ -> },
     onBackClick: () -> Unit,
     onClearCache: () -> Unit,
     onClearSearchHistory: () -> Unit,
@@ -247,6 +252,16 @@ fun StorageSettingsScreen(
                 fontSize = 14.sp
             )
         }
+
+        HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
+
+        // Auto-Delete Read Chapters
+        SettingsSwitchItem(
+            title = "الحذف التلقائي للفصول المقروءة",
+            subtitle = "حذف فصل التنزيل تلقائياً بعد الانتهاء من قراءته (مع الاحتفاظ بآخر ${settings.keepLastReadChaptersCount} فصول لتوفير المساحة)",
+            checked = settings.autoDeleteReadChapters,
+            onCheckedChange = { onUpdateBoolean("autoDeleteReadChapters", it) }
+        )
     }
 
     if (showMoveStorageDialog) {
@@ -540,6 +555,51 @@ fun ReadingOptionsSettingsScreen(
             onCheckedChange = { onUpdateBoolean("keepScreenOn", it) }
         )
 
+        HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
+
+        Text(
+            text = "تحسينات القارئ المتقدمة",
+            color = TextPrimaryWhite,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+        )
+
+        SettingsSwitchItem(
+            title = "قطع الهوامش البيضاء/السوداء تلقائياً",
+            subtitle = "إزالة الحواف الفارغة حول صفحات المانجا اليابانية لتملأ الشاشة بالكامل",
+            checked = settings.autoCropBorders,
+            onCheckedChange = { onUpdateBoolean("autoCropBorders", it) }
+        )
+
+        SettingsSwitchItem(
+            title = "التحميل المسبق الذكي للفصل التالي",
+            subtitle = "بدء تحميل روابط وأول 3 صفحات من الفصل التالي في الخلفية عند الوصول إلى آخر 20% من الفصل الحالي",
+            checked = settings.preloadNextChapter,
+            onCheckedChange = { onUpdateBoolean("preloadNextChapter", it) }
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { activeDialogKey = "tapZoneMode" }
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .testTag("tap_zone_mode_row")
+        ) {
+            Text(
+                text = "تخصيص مناطق النقر على الشاشة",
+                color = TextPrimaryWhite,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = settings.tapZoneMode,
+                color = TextSecondaryGrey,
+                fontSize = 13.sp
+            )
+        }
+
         Spacer(modifier = Modifier.height(28.dp))
     }
 
@@ -548,6 +608,15 @@ fun ReadingOptionsSettingsScreen(
             "readingMode" -> Triple("الوضع", listOf("الصفحات", "ويبتون مستمر", "صفحة مزدوجة"), settings.readingMode)
             "pageFitMode" -> Triple("وضع حجم الصفحة", listOf("تناسب الشاشة", "تناسب العرض", "تناسب الارتفاع"), settings.pageFitMode)
             "loadPagesMode" -> Triple("تحميل الصفحات", listOf("عبر واي فاي فقط", "دائماً"), settings.loadPagesMode)
+            "tapZoneMode" -> Triple(
+                "تخصيص مناطق النقر",
+                listOf(
+                    "قياسي (يمين/يسار للتقليب، منتصف للقائمة)",
+                    "جانبي (كامل اليمين واليسار للتقليب)",
+                    "المنتصف فقط للقائمة"
+                ),
+                settings.tapZoneMode
+            )
             else -> Triple("إتجاه التمرير", listOf("من اليسار لليمين", "من اليمين لليسار", "عمودي"), settings.scrollDirection)
         }
         AlertDialog(
@@ -594,7 +663,8 @@ fun ReadingOptionsSettingsScreen(
 fun NewChaptersSettingsScreen(
     settings: UserSettings,
     onBackClick: () -> Unit,
-    onUpdateBoolean: (String, Boolean) -> Unit
+    onUpdateBoolean: (String, Boolean) -> Unit,
+    onCheckLibraryUpdatesNow: () -> Unit = {}
 ) {
     // Exact screen from 01:29
     Column(
@@ -608,7 +678,7 @@ fun NewChaptersSettingsScreen(
 
         SettingsSwitchItem(
             title = "التحقق من فصول جديدة",
-            subtitle = null,
+            subtitle = "فحص الأعمال المفضلة دورياً في الخلفية وإرسال إشعار عند صدور فصل جديد",
             checked = settings.checkNewChapters,
             onCheckedChange = { onUpdateBoolean("checkNewChapters", it) }
         )
@@ -619,6 +689,22 @@ fun NewChaptersSettingsScreen(
             checked = settings.checkNewChaptersWifiOnly,
             onCheckedChange = { onUpdateBoolean("checkNewChaptersWifiOnly", it) }
         )
+
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedButton(
+            onClick = onCheckLibraryUpdatesNow,
+            shape = RoundedCornerShape(22.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .testTag("check_library_updates_now_btn")
+        ) {
+            Text(
+                text = "فحص تحديثات الأعمال المفضلة الآن",
+                color = PeriwinklePrimary,
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 
@@ -696,11 +782,14 @@ fun MoreSettingsScreen(
     onBackClick: () -> Unit,
     onUpdateInt: (String, Int) -> Unit,
     onUpdateBoolean: (String, Boolean) -> Unit,
+    onUpdateString: (String, String) -> Unit = { _, _ -> },
     onCreateBackup: () -> Unit,
     onRestoreBackup: () -> Unit,
     onShowToast: (String) -> Unit
 ) {
     var activeModal by remember { mutableStateOf<String?>(null) }
+    var tempTrackerUsername by remember { mutableStateOf("") }
+    var tempPinInput by remember { mutableStateOf(settings.appLockPin) }
 
     // Exact screen from 01:32-01:34 ("اعدادات اخرى")
     Column(
@@ -729,15 +818,15 @@ fun MoreSettingsScreen(
                 .padding(horizontal = 20.dp, vertical = 14.dp)
                 .testTag("backup_restore_row")
         ) {
-            Text("النسخ والاستعادة", color = TextPrimaryWhite, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Text("الجهاز أو الحساب", color = TextSecondaryGrey, fontSize = 14.sp)
+            Text("النسخ والاستعادة الشاملة (JSON)", color = TextPrimaryWhite, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text("المواقع، المفضلة، السجل، تقدم القراءة، والإعدادات", color = TextSecondaryGrey, fontSize = 14.sp)
         }
 
         HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
 
-        // Section: شبكة الاتصال
+        // Section: شبكة الاتصال وتجاوز الحجب
         Text(
-            text = "شبكة الاتصال",
+            text = "شبكة الاتصال وتجاوز الحجب",
             color = TextPrimaryWhite,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
@@ -760,6 +849,85 @@ fun MoreSettingsScreen(
             subtitle = null,
             checked = settings.downloadWifiOnly,
             onCheckedChange = { onUpdateBoolean("downloadWifiOnly", it) }
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { activeModal = "dohProvider" }
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .testTag("doh_provider_row")
+        ) {
+            Text("نظام DNS عبر HTTPS (DoH)", color = TextPrimaryWhite, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text("لتجاوز حجب المواقع: ${settings.dohProvider}", color = PeriwinklePrimary, fontSize = 14.sp)
+        }
+
+        HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
+
+        // Section: الربط مع خدمات التتبع العالمية (AniList / MyAnimeList)
+        Text(
+            text = "الربط مع خدمات التتبع العالمية",
+            color = TextPrimaryWhite,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+        )
+
+        SettingsSwitchItem(
+            title = "مزامنة التقدم مع AniList",
+            subtitle = if (settings.anilistUsername.isNotBlank()) "الحساب المتصل: ${settings.anilistUsername}" else "تحديث رقم الفصل تلقائياً عند القراءة",
+            checked = settings.anilistTrackingEnabled,
+            onCheckedChange = { enabled ->
+                onUpdateBoolean("anilistTrackingEnabled", enabled)
+                if (enabled) {
+                    tempTrackerUsername = settings.anilistUsername
+                    activeModal = "anilistAccount"
+                }
+            }
+        )
+
+        SettingsSwitchItem(
+            title = "مزامنة التقدم مع MyAnimeList",
+            subtitle = if (settings.malUsername.isNotBlank()) "الحساب المتصل: ${settings.malUsername}" else "تحديث الفصول المقروءة تلقائياً على MAL",
+            checked = settings.malTrackingEnabled,
+            onCheckedChange = { enabled ->
+                onUpdateBoolean("malTrackingEnabled", enabled)
+                if (enabled) {
+                    tempTrackerUsername = settings.malUsername
+                    activeModal = "malAccount"
+                }
+            }
+        )
+
+        HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
+
+        // Section: الخصوصية والأمان (قفل التطبيق + وضع التمويه)
+        Text(
+            text = "الخصوصية والأمان",
+            color = TextPrimaryWhite,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+        )
+
+        SettingsSwitchItem(
+            title = "قفل التطبيق بالرمز السري / البصمة",
+            subtitle = "طلب رمز الحماية (${settings.appLockPin}) عند فتح التطبيق",
+            checked = settings.appLockEnabled,
+            onCheckedChange = { enabled ->
+                onUpdateBoolean("appLockEnabled", enabled)
+                if (enabled) {
+                    tempPinInput = settings.appLockPin
+                    activeModal = "appLockPin"
+                }
+            }
+        )
+
+        SettingsSwitchItem(
+            title = "إخفاء الشاشة في التطبيقات الأخيرة (وضع التمويه)",
+            subtitle = "منع التقاط الشاشة وتمويه محتوى التطبيق في قائمة المهام",
+            checked = settings.secureScreenEnabled,
+            onCheckedChange = { onUpdateBoolean("secureScreenEnabled", it) }
         )
 
         HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
@@ -812,10 +980,10 @@ fun MoreSettingsScreen(
             AlertDialog(
                 onDismissRequest = { activeModal = null },
                 containerColor = AppDialogSurface,
-                title = { Text("النسخ والاستعادة", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+                title = { Text("النسخ والاستعادة الشاملة", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
                 text = {
                     Text(
-                        text = "يمكنك إنشاء نسخة احتياطية محلية لجميع المواقع المضافة والمفضلة في مجلد التخزين، أو استعادتها في أي وقت.",
+                        text = "يمكنك إنشاء نسخة احتياطية شاملة بصيغة JSON تضم جميع المواقع المضافة، المفضلة، السجل، الفصول المقروءة، والإعدادات، أو استعادتها بضغطة واحدة.",
                         color = TextSecondaryGrey
                     )
                 },
@@ -838,6 +1006,142 @@ fun MoreSettingsScreen(
                         }
                     ) {
                         Text("استعادة نسخة سابقة", color = PeriwinklePrimary)
+                    }
+                }
+            )
+        }
+        "dohProvider" -> {
+            val providers = listOf("إيقاف", "Cloudflare (1.1.1.1)", "Google DNS (8.8.8.8)", "AdGuard DNS")
+            AlertDialog(
+                onDismissRequest = { activeModal = null },
+                containerColor = AppDialogSurface,
+                title = { Text("نظام DNS عبر HTTPS (DoH)", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        providers.forEach { provider ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onUpdateString("dohProvider", provider)
+                                        activeModal = null
+                                        onShowToast("تم تفعيل مزود DNS: $provider")
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = settings.dohProvider == provider,
+                                    onClick = {
+                                        onUpdateString("dohProvider", provider)
+                                        activeModal = null
+                                        onShowToast("تم تفعيل مزود DNS: $provider")
+                                    },
+                                    colors = RadioButtonDefaults.colors(selectedColor = PeriwinklePrimary)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(provider, color = TextPrimaryWhite)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { activeModal = null }) {
+                        Text("إغلاق", color = PeriwinklePrimary)
+                    }
+                }
+            )
+        }
+        "anilistAccount" -> {
+            AlertDialog(
+                onDismissRequest = { activeModal = null },
+                containerColor = AppDialogSurface,
+                title = { Text("ربط حساب AniList", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("أدخل اسم المستخدم في AniList لمزامنة الفصول المقروءة تلقائياً:", color = TextSecondaryGrey, fontSize = 13.sp)
+                        OutlinedTextField(
+                            value = tempTrackerUsername,
+                            onValueChange = { tempTrackerUsername = it },
+                            label = { Text("اسم المستخدم في AniList") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onUpdateString("anilistUsername", tempTrackerUsername.trim().ifBlank { "ReaderUser" })
+                            activeModal = null
+                            onShowToast("تم ربط حساب AniList بنجاح")
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = PeriwinklePrimary, contentColor = PeriwinkleOnPrimary)
+                    ) {
+                        Text("حفظ وربط", fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+        "malAccount" -> {
+            AlertDialog(
+                onDismissRequest = { activeModal = null },
+                containerColor = AppDialogSurface,
+                title = { Text("ربط حساب MyAnimeList", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("أدخل اسم المستخدم في MyAnimeList لمزامنة تقدم القراءة تلقائياً:", color = TextSecondaryGrey, fontSize = 13.sp)
+                        OutlinedTextField(
+                            value = tempTrackerUsername,
+                            onValueChange = { tempTrackerUsername = it },
+                            label = { Text("اسم المستخدم في MAL") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onUpdateString("malUsername", tempTrackerUsername.trim().ifBlank { "MALReader" })
+                            activeModal = null
+                            onShowToast("تم ربط حساب MyAnimeList بنجاح")
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = PeriwinklePrimary, contentColor = PeriwinkleOnPrimary)
+                    ) {
+                        Text("حفظ وربط", fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+        "appLockPin" -> {
+            AlertDialog(
+                onDismissRequest = { activeModal = null },
+                containerColor = AppDialogSurface,
+                title = { Text("إعداد رمز قفل التطبيق", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("أدخل رمز الحماية (4 أرقام) لقفل التطبيق:", color = TextSecondaryGrey, fontSize = 13.sp)
+                        OutlinedTextField(
+                            value = tempPinInput,
+                            onValueChange = { if (it.length <= 6) tempPinInput = it.filter { ch -> ch.isDigit() } },
+                            label = { Text("رمز القفل (PIN)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val validPin = tempPinInput.ifBlank { "1234" }
+                            onUpdateString("appLockPin", validPin)
+                            activeModal = null
+                            onShowToast("تم تفعيل قفل التطبيق بالرمز: $validPin")
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = PeriwinklePrimary, contentColor = PeriwinkleOnPrimary)
+                    ) {
+                        Text("حفظ الرمز", fontWeight = FontWeight.Bold)
                     }
                 }
             )

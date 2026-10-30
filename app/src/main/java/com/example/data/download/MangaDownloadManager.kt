@@ -41,12 +41,7 @@ class MangaDownloadManager(
     private val dao: AppDao,
     private val storageManager: LocalStorageManager,
     private val notificationHelper: DownloadNotificationHelper? = null,
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    private val httpClient: OkHttpClient = LiveMangaSiteScraper.httpClient
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -321,9 +316,13 @@ class MangaDownloadManager(
             )
 
             // 1. Resolve chapter page URLs strictly (never fake offline URLs when chapterUrl is http/https!)
+            val cachedChapterPages = LiveMangaSiteScraper.getCachedChapterPages(chapter.chapterUrl)
             val resolvedPageUrls: List<String> = when {
                 chapter.pageImageUrls.isNotEmpty() -> {
                     LinkedHashSet(chapter.pageImageUrls.filter { it.isNotBlank() }).toList()
+                }
+                cachedChapterPages.isNotEmpty() -> {
+                    LinkedHashSet(cachedChapterPages.filter { it.isNotBlank() }).toList()
                 }
                 chapter.chapterUrl.startsWith("http://") || chapter.chapterUrl.startsWith("https://") -> {
                     val adapter = if (site != null) {
@@ -349,11 +348,7 @@ class MangaDownloadManager(
                         chapter = chapter
                     )
                     if (pageResult.data.isEmpty()) {
-                        val reason = pageResult.errorMessage ?: if (pageResult.requiresCloudflareChallenge) {
-                            "يتطلب المصدر فتح الصفحة في المتصفح المدمج لتجاوز حماية Cloudflare أولاً"
-                        } else {
-                            "تعذر استخراج روابط صور الفصل من صفحة المصدر"
-                        }
+                        val reason = pageResult.errorMessage ?: "تعذر استخراج روابط صور الفصل من صفحة المصدر"
                         DiagnosticLogger.logError(
                             category = DiagnosticCategory.DOWNLOAD,
                             message = "فشل استخراج روابط صور الفصل ${chapter.number}: $reason",
@@ -374,9 +369,11 @@ class MangaDownloadManager(
                         )
                         return
                     }
-                    LinkedHashSet(
+                    val extracted = LinkedHashSet(
                         pageResult.data.filter { it.isNotBlank() && !LiveMangaSiteScraper.isIgnoredAssetImage(it) }
                     ).toList()
+                    LiveMangaSiteScraper.cacheChapterPages(chapter.chapterUrl, extracted)
+                    extracted
                 }
                 chapter.chapterUrl.startsWith("offline://") || chapter.chapterUrl.startsWith("test://") -> {
                     val fallbackCount = chapter.pageCount.coerceAtLeast(3)
@@ -964,7 +961,7 @@ class MangaDownloadManager(
             val effectiveReferer = refererUrl.ifBlank { siteUrl }.trim()
             val builder = Request.Builder()
                 .url(cleanUrl)
-                .header("User-Agent", LiveMangaSiteScraper.DEFAULT_USER_AGENT)
+                .header("User-Agent", LiveMangaSiteScraper.activeUserAgent.ifBlank { LiveMangaSiteScraper.DEFAULT_USER_AGENT })
                 .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
                 .header("Accept-Language", "ar,en-US;q=0.9,en;q=0.8")
 
@@ -1102,6 +1099,27 @@ class MangaDownloadManager(
     }
 
     fun togglePauseTask(task: DownloadTaskEntity) = togglePauseSingleTask(task)
+
+    fun reorderQueueTask(task: DownloadTaskEntity, moveUp: Boolean) {
+        scope.launch {
+            val allTasks = dao.getAllDownloadTasksOnce()
+            val idx = allTasks.indexOfFirst { it.id == task.id }
+            if (idx == -1) return@launch
+            val targetIdx = if (moveUp) idx - 1 else idx + 1
+            if (targetIdx !in allTasks.indices) return@launch
+            val neighbor = allTasks[targetIdx]
+            val t1Time = task.createdAt
+            val t2Time = neighbor.createdAt
+            val newTaskTime = if (t1Time == t2Time) {
+                if (moveUp) t2Time + 1000L else t2Time - 1000L
+            } else {
+                t2Time
+            }
+            val newNeighborTime = if (t1Time == t2Time) t2Time else t1Time
+            dao.updateDownloadTask(task.copy(createdAt = newTaskTime))
+            dao.updateDownloadTask(neighbor.copy(createdAt = newNeighborTime))
+        }
+    }
 
     fun cancelSingleTask(task: DownloadTaskEntity) {
         cancelledTaskIds.add(task.id)

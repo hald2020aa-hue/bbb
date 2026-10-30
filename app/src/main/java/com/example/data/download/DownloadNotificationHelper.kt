@@ -225,6 +225,34 @@ class DownloadNotificationHelper(private val context: Context) {
         }
     }
 
+    fun showNewChapterUpdateNotification(
+        workTitle: String,
+        chapterNumber: Int,
+        siteName: String
+    ) {
+        if (!canPostNotifications()) return
+        try {
+            ensureChannelCreated()
+            val taskId = "update_${workTitle}_$chapterNumber"
+            val pendingIntent = buildOpenChapterPendingIntent(taskId, workTitle, chapterNumber)
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_notify_chat)
+                .setContentTitle("فصل جديد متاح — $workTitle")
+                .setContentText("صدر الفصل $chapterNumber على $siteName")
+                .setSubText("تحديثات المكتبة")
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .apply {
+                    if (pendingIntent != null) setContentIntent(pendingIntent)
+                }
+                .build()
+
+            NotificationManagerCompat.from(context).notify(notificationIdForTask(taskId), notification)
+        } catch (_: SecurityException) {
+        } catch (_: Throwable) {
+        }
+    }
+
     fun cancelNotification(taskId: String) {
         try {
             NotificationManagerCompat.from(context).cancel(notificationIdForTask(taskId))

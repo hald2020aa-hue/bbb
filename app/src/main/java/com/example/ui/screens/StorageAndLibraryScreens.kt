@@ -726,6 +726,7 @@ fun DownloadsScreen(
     onTogglePauseTask: (DownloadTaskEntity) -> Unit = {},
     onCancelTask: (DownloadTaskEntity) -> Unit = {},
     onRetryTask: (DownloadTaskEntity) -> Unit = {},
+    onReorderTask: (DownloadTaskEntity, Boolean) -> Unit = { _, _ -> },
     onOpenDownloadedTask: (DownloadTaskEntity) -> Unit = {},
     onTogglePauseAll: () -> Unit = {},
     onCancelAll: () -> Unit = {},
@@ -877,6 +878,8 @@ fun DownloadsScreen(
                             onTogglePause = { onTogglePauseTask(task) },
                             onCancel = { onCancelTask(task) },
                             onRetry = { onRetryTask(task) },
+                            onMoveUp = { onReorderTask(task, true) },
+                            onMoveDown = { onReorderTask(task, false) },
                             onOpen = { onOpenDownloadedTask(task) },
                             onDelete = { onDeleteTask(task) }
                         )
@@ -900,6 +903,8 @@ fun DownloadsScreen(
                             onTogglePause = { onTogglePauseTask(task) },
                             onCancel = { onCancelTask(task) },
                             onRetry = { onRetryTask(task) },
+                            onMoveUp = {},
+                            onMoveDown = {},
                             onOpen = { onOpenDownloadedTask(task) },
                             onDelete = { onDeleteTask(task) }
                         )
@@ -917,6 +922,8 @@ private fun DownloadTaskCard(
     onTogglePause: () -> Unit,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
+    onMoveUp: () -> Unit = {},
+    onMoveDown: () -> Unit = {},
     onOpen: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -1010,13 +1017,16 @@ private fun DownloadTaskCard(
                             .clip(RoundedCornerShape(3.dp))
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    // Action buttons matching 02:41: إيقاف + إلغاء
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Action buttons matching 02:41: إيقاف + إلغاء + Queue Reorder Priority (↑ / ↓)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         OutlinedButton(
                             onClick = onTogglePause,
                             shape = RoundedCornerShape(20.dp),
                             border = BorderStroke(1.dp, Color(0xFF4C5264)),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
                             modifier = Modifier
                                 .height(34.dp)
                                 .testTag("download_pause_btn_${task.id}")
@@ -1032,7 +1042,7 @@ private fun DownloadTaskCard(
                             onClick = onCancel,
                             shape = RoundedCornerShape(20.dp),
                             border = BorderStroke(1.dp, Color(0xFF4C5264)),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
                             modifier = Modifier
                                 .height(34.dp)
                                 .testTag("download_cancel_btn_${task.id}")
@@ -1043,6 +1053,28 @@ private fun DownloadTaskCard(
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
+                        }
+                        OutlinedButton(
+                            onClick = onMoveUp,
+                            shape = RoundedCornerShape(16.dp),
+                            border = BorderStroke(1.dp, Color(0xFF4C5264)),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("download_move_up_${task.id}")
+                        ) {
+                            Text("↑ أولوية", color = TextPrimaryWhite, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = onMoveDown,
+                            shape = RoundedCornerShape(16.dp),
+                            border = BorderStroke(1.dp, Color(0xFF4C5264)),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("download_move_down_${task.id}")
+                        ) {
+                            Text("↓", color = TextSecondaryGrey, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 } else {
@@ -1120,10 +1152,17 @@ private fun DownloadTaskCard(
 @Composable
 fun RecommendationsScreen(
     enabledSites: List<SiteEntity>,
+    globalSearchQuery: String = "",
+    isGlobalSearching: Boolean = false,
+    globalSearchResultsBySite: Map<String, List<MangaWork>> = emptyMap(),
+    onPerformGlobalSearch: (String) -> Unit = {},
+    onSelectMangaWork: (MangaWork) -> Unit = {},
     onOpenDrawer: () -> Unit,
     onOpenSite: (SiteEntity) -> Unit,
     onOpenManageSites: () -> Unit
 ) {
+    var localSearchInput by remember(globalSearchQuery) { mutableStateOf(globalSearchQuery) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1142,7 +1181,53 @@ fun RecommendationsScreen(
                 Icon(Icons.Default.Menu, contentDescription = "القائمة", tint = TextPrimaryWhite)
             }
             Spacer(modifier = Modifier.width(8.dp))
-            Text("التوصيات", color = TextPrimaryWhite, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text("التوصيات والبحث الشامل", color = TextPrimaryWhite, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        }
+
+        // Unified Global Search Bar across all enabled sources
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = localSearchInput,
+                onValueChange = { localSearchInput = it },
+                placeholder = { Text("ابحث عن مانجا في جميع المصادر معاً...", fontSize = 13.sp) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = PeriwinklePrimary,
+                    unfocusedBorderColor = Color(0xFF454957),
+                    focusedTextColor = TextPrimaryWhite,
+                    unfocusedTextColor = TextPrimaryWhite
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("global_search_input")
+            )
+            Button(
+                onClick = { onPerformGlobalSearch(localSearchInput) },
+                enabled = !isGlobalSearching && localSearchInput.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = PeriwinklePrimary,
+                    contentColor = PeriwinkleOnPrimary
+                ),
+                modifier = Modifier.testTag("global_search_submit_btn")
+            ) {
+                if (isGlobalSearching) {
+                    CircularProgressIndicator(
+                        color = PeriwinkleOnPrimary,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp)
+                    )
+                } else {
+                    Icon(Icons.Default.Search, contentDescription = "بحث شامل", modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("بحث", fontWeight = FontWeight.Bold)
+                }
+            }
         }
 
         // Exact Empty State from 03:55: ( ⊙д⊙) + لا تتوفر تصنيفات كافية لتوصياتك. يمكنك تصفح «الكل». + إعادة المحاولة
@@ -1186,6 +1271,63 @@ fun RecommendationsScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (globalSearchResultsBySite.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "نتائج البحث الشامل في المصادر (${globalSearchResultsBySite.values.sumOf { it.size }} نتيجة):",
+                            color = PeriwinklePrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    globalSearchResultsBySite.forEach { (siteName, siteWorks) ->
+                        item(key = "global_site_$siteName") {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "$siteName (${siteWorks.size})",
+                                    color = TextPrimaryWhite,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    items(siteWorks, key = { "${siteName}_${it.id}" }) { work ->
+                                        Column(
+                                            modifier = Modifier
+                                                .width(114.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .clickable { onSelectMangaWork(work) },
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            MangaCoverArtwork(
+                                                work = work,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(156.dp),
+                                                showArabicTitleBanner = false
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = work.title,
+                                                color = TextPrimaryWhite,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        HorizontalDivider(color = Color(0xFF2B2F3C), modifier = Modifier.padding(vertical = 6.dp))
+                    }
+                }
+
                 item {
                     Text(
                         text = "تصفح التوصيات المباشرة من مواقعك المفعلة:",
@@ -1506,9 +1648,12 @@ fun FavoritesScreen(
     onOpenDrawer: () -> Unit,
     onOpenFavoriteUrl: (String, String) -> Unit,
     onRemoveFavorite: (FavoriteEntity) -> Unit,
+    onUpdateFavoriteCategory: (FavoriteEntity, String) -> Unit = { _, _ -> },
+    onCheckLibraryUpdatesNow: () -> Unit = {},
     onManageCategories: () -> Unit
 ) {
     var selectedCategory by remember { mutableStateOf("الكل") }
+    var activeCategoryMenuFavId by remember { mutableStateOf<Long?>(null) }
 
     val filtered = remember(favorites, selectedCategory) {
         if (selectedCategory == "الكل") favorites
@@ -1516,7 +1661,7 @@ fun FavoritesScreen(
     }
 
     val defaultChips = remember(categories, favorites) {
-        val base = listOf("الكل", "قراءة الآن", "قراءة لاحقا")
+        val base = listOf("الكل", "أقرأها حالياً", "مكتملة", "مؤجلة", "أرغب بقراءتها")
         val custom = categories.map { it.name }.filter { it !in base }
         base + custom
     }
@@ -1543,12 +1688,20 @@ fun FavoritesScreen(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("المفضلة", color = TextPrimaryWhite, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
-            TextButton(onClick = onManageCategories) {
-                Text("فئات المفضلة", color = PeriwinklePrimary, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onCheckLibraryUpdatesNow,
+                    modifier = Modifier.testTag("favorites_check_updates_btn")
+                ) {
+                    Icon(Icons.Default.Sync, contentDescription = "فحص التحديثات", tint = PeriwinklePrimary)
+                }
+                TextButton(onClick = onManageCategories) {
+                    Text("فئات المفضلة", color = PeriwinklePrimary, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
 
-        // Category chips matching 04:00: الكل 0 ، قراءة الآن 0 ، قراءة لاحقا 0
+        // Category chips: الكل ، أقرأها حالياً ، مكتملة ، مؤجلة ، أرغب بقراءتها
         LazyRow(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1612,7 +1765,32 @@ fun FavoritesScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(fav.title, color = TextPrimaryWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                                 Spacer(modifier = Modifier.height(2.dp))
-                                Text(fav.url, color = TextSecondaryGrey, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    text = "${fav.siteName.ifBlank { "المكتبة" }} • الفئة: ${fav.category}",
+                                    color = PeriwinklePrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Box {
+                                TextButton(onClick = { activeCategoryMenuFavId = fav.id }) {
+                                    Text("تغيير الفئة", color = PeriwinklePrimary, fontSize = 12.sp)
+                                }
+                                DropdownMenu(
+                                    expanded = activeCategoryMenuFavId == fav.id,
+                                    onDismissRequest = { activeCategoryMenuFavId = null },
+                                    containerColor = AppDialogSurface
+                                ) {
+                                    defaultChips.filter { it != "الكل" }.forEach { catOption ->
+                                        DropdownMenuItem(
+                                            text = { Text(catOption, color = TextPrimaryWhite) },
+                                            onClick = {
+                                                activeCategoryMenuFavId = null
+                                                onUpdateFavoriteCategory(fav, catOption)
+                                            }
+                                        )
+                                    }
+                                }
                             }
                             IconButton(onClick = { onRemoveFavorite(fav) }) {
                                 Icon(Icons.Default.Delete, contentDescription = "حذف", tint = Color(0xFFFF6B6B))
