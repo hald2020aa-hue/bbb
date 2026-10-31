@@ -526,20 +526,77 @@ class AppRepository(
         val taskId = dao.insertDownloadTask(initialTask)
         try {
             val savedDir = getSavedDirectory()
-            val fileName = "download_${System.currentTimeMillis()}.html"
-            val targetFile = File(savedDir, fileName)
+            val cleanUa = LiveMangaSiteScraper.activeUserAgent
+                .replace("; wv", "")
+                .ifBlank { LiveMangaSiteScraper.DEFAULT_USER_AGENT }
+            val cookies = LiveMangaSiteScraper.getCombinedCookies(targetUrl = url, refererUrl = url)
 
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(url)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
-                .build()
-
-            dao.updateDownloadTask(initialTask.copy(id = taskId, progress = 55))
-
-            httpClient.newCall(request).execute().use { response ->
-                val bytes = response.body?.bytes() ?: throw IllegalStateException("لم يتم استلام بيانات من الخادم")
-                targetFile.writeBytes(bytes)
+                .header("User-Agent", cleanUa)
+            if (cookies.isNotBlank()) {
+                requestBuilder.header("Cookie", cookies)
             }
+
+            dao.updateDownloadTask(initialTask.copy(id = taskId, progress = 40))
+
+            var finalBytes: ByteArray? = null
+            var fileExt = "jpg"
+
+            LiveMangaSiteScraper.httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                val contentType = response.header("Content-Type").orEmpty().lowercase()
+                val rawBytes = response.body?.bytes() ?: throw IllegalStateException("لم يتم استلام بيانات من الخادم")
+
+                if (contentType.contains("text/html")) {
+                    // Extract actual chapter image URLs from <img> tags (src / data-src) instead of saving raw HTML
+                    val html = rawBytes.toString(Charsets.UTF_8)
+                    val imgUrls = LiveMangaSiteScraper.extractImgTagSrcUrls(html, url)
+                        .ifEmpty { LiveMangaSiteScraper.parseChapterPagesHtml(html, url) }
+                    if (imgUrls.isNotEmpty()) {
+                        val firstImgUrl = imgUrls.first()
+                        for (attempt in 1..3) {
+                            val imgReq = Request.Builder()
+                                .url(firstImgUrl)
+                                .header("User-Agent", cleanUa)
+                                .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                                .apply {
+                                    if (attempt == 1) header("Referer", url)
+                                    if (cookies.isNotBlank()) header("Cookie", cookies)
+                                }
+                                .build()
+                            val fetched = runCatching {
+                                LiveMangaSiteScraper.httpClient.newCall(imgReq).execute().use { imgResp ->
+                                    if (imgResp.isSuccessful) imgResp.body?.bytes() else null
+                                }
+                            }.getOrNull()
+                            if (fetched != null && fetched.size > 512) {
+                                finalBytes = fetched
+                                fileExt = when {
+                                    firstImgUrl.contains(".webp", ignoreCase = true) -> "webp"
+                                    firstImgUrl.contains(".png", ignoreCase = true) -> "png"
+                                    else -> "jpg"
+                                }
+                                break
+                            }
+                        }
+                    }
+                    if (finalBytes == null) {
+                        finalBytes = rawBytes
+                        fileExt = "html"
+                    }
+                } else {
+                    finalBytes = rawBytes
+                    fileExt = when {
+                        contentType.contains("webp") -> "webp"
+                        contentType.contains("png") -> "png"
+                        contentType.contains("html") -> "html"
+                        else -> "jpg"
+                    }
+                }
+            }
+
+            val targetFile = File(savedDir, "download_${System.currentTimeMillis()}.$fileExt")
+            targetFile.writeBytes(finalBytes ?: ByteArray(0))
 
             val size = targetFile.length()
             dao.updateDownloadTask(

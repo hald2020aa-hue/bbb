@@ -404,8 +404,9 @@ class MangaDownloadManager(
                 return
             }
 
-            val expectedPages = resolvedPageUrls.size
-            val savedLocalPaths = mutableListOf<String>()
+            var currentResolvedUrls = resolvedPageUrls
+            val expectedPages = currentResolvedUrls.size
+            val savedPathsByIndex = java.util.TreeMap<Int, String>()
             val failedPageNumbers = mutableListOf<Int>()
             var cumulativeBytes = 0L
 
@@ -418,105 +419,141 @@ class MangaDownloadManager(
                 totalPages = expectedPages
             )
 
-            for ((index, pageUrl) in resolvedPageUrls.withIndex()) {
-                while (_isAllPaused.value || pausedTaskIds.contains(taskId)) {
-                    if (cancelledTaskIds.contains(taskId)) break
-                    delay(250)
-                }
-                if (cancelledTaskIds.contains(taskId)) {
-                    storageManager.deleteChapterFiles(work.sourceId, work.id, chapterKey, savedLocalPaths)
-                    markCancelled(taskId, taskKeyStr, work, chapter, chapterKey, localCoverPath)
-                    return
-                }
-
-                val pageNum = index + 1
-                val remainingPages = (expectedPages - index).coerceAtLeast(1)
-                val etaSec = (remainingPages * 2).coerceAtLeast(1)
-                val progressFloat = ((savedLocalPaths.size.toFloat() / expectedPages.toFloat()) * 100f).coerceIn(0f, 99f)
-
-                updateProgressInDb(
-                    taskId = taskId,
-                    work = work,
-                    chapter = chapter,
-                    chapterKey = chapterKey,
-                    localCoverPath = localCoverPath,
-                    expectedPages = expectedPages,
-                    downloadedCount = savedLocalPaths.size,
-                    localPaths = savedLocalPaths,
-                    bytesSoFar = cumulativeBytes,
-                    progressFloat = progressFloat,
-                    etaSeconds = etaSec
-                )
-
-                // Check if this page was already downloaded and is valid on disk (resumable retry)
-                val existingValidFile = storageManager.getExistingValidPageFile(
-                    sourceId = work.sourceId,
-                    workId = work.id,
-                    chapterKey = chapterKey,
-                    pageIndex = index
-                )
-                if (existingValidFile != null) {
-                    savedLocalPaths.add(existingValidFile.absolutePath)
-                    cumulativeBytes += existingValidFile.length()
-                    notificationHelper?.showDownloadProgress(
-                        taskId = taskKeyStr,
+            val maxPartialRetryPasses = 3
+            for (pass in 1..maxPartialRetryPasses) {
+                if (pass > 1) {
+                    // Automatic retry on partial download failure (إعادة المحاولة التلقائية عند فشل التحميل الجزئي)
+                    DiagnosticLogger.logInfo(
+                        category = DiagnosticCategory.DOWNLOAD,
+                        message = "إعادة محاولة التحميل الجزئي التلقائية (الجولة $pass/$maxPartialRetryPasses) للصفحات المتبقية: ${failedPageNumbers.joinToString("، ")}",
                         workId = work.id,
-                        workTitle = work.title,
-                        chapterNumber = chapter.number,
-                        downloadedPages = savedLocalPaths.size,
-                        totalPages = expectedPages
+                        chapterId = chapter.id,
+                        url = chapter.chapterUrl
                     )
-                    continue
+                    delay(450L * (pass - 1))
+                    if (chapter.chapterUrl.startsWith("http://") || chapter.chapterUrl.startsWith("https://")) {
+                        val refreshed = LiveMangaSiteScraper.fetchChapterPages(
+                            work = work,
+                            chapter = chapter,
+                            forceRefresh = true
+                        ).pageUrls
+                        if (refreshed.size == expectedPages) {
+                            currentResolvedUrls = refreshed
+                        }
+                    }
                 }
+                failedPageNumbers.clear()
 
-                val pageBytes = downloadSingleImageBytesWithRetry(
-                    imageUrl = pageUrl,
-                    refererUrl = chapter.chapterUrl.ifBlank { work.mangaUrl.ifBlank { work.siteUrl } },
-                    siteUrl = work.siteUrl,
-                    workId = work.id,
-                    chapterId = chapter.id,
-                    workTitle = work.title,
-                    chapterTitle = chapter.title,
-                    pageNumber = pageNum
-                )
+                for ((index, pageUrl) in currentResolvedUrls.withIndex()) {
+                    while (_isAllPaused.value || pausedTaskIds.contains(taskId)) {
+                        if (cancelledTaskIds.contains(taskId)) break
+                        delay(250)
+                    }
+                    if (cancelledTaskIds.contains(taskId)) {
+                        storageManager.deleteChapterFiles(work.sourceId, work.id, chapterKey, savedPathsByIndex.values.toList())
+                        markCancelled(taskId, taskKeyStr, work, chapter, chapterKey, localCoverPath)
+                        return
+                    }
 
-                if (pageBytes != null && storageManager.isValidChapterPageImageBytes(pageBytes)) {
-                    val ext = guessImageExtension(pageUrl, pageBytes)
-                    val savedFile = storageManager.saveChapterPageImage(
+                    // Skip pages already downloaded and verified in an earlier pass or previous attempt
+                    if (savedPathsByIndex.containsKey(index)) {
+                        continue
+                    }
+
+                    val existingValidFile = storageManager.getExistingValidPageFile(
                         sourceId = work.sourceId,
                         workId = work.id,
                         chapterKey = chapterKey,
-                        pageIndex = index,
-                        bytes = pageBytes,
-                        extension = ext,
-                        compressToWebp = compressDownloadsWebp
+                        pageIndex = index
                     )
-                    if (storageManager.isValidImageFile(savedFile)) {
-                        savedLocalPaths.add(savedFile.absolutePath)
-                        cumulativeBytes += savedFile.length()
+                    if (existingValidFile != null) {
+                        savedPathsByIndex[index] = existingValidFile.absolutePath
+                        cumulativeBytes += existingValidFile.length()
                         notificationHelper?.showDownloadProgress(
                             taskId = taskKeyStr,
                             workId = work.id,
                             workTitle = work.title,
                             chapterNumber = chapter.number,
-                            downloadedPages = savedLocalPaths.size,
+                            downloadedPages = savedPathsByIndex.size,
                             totalPages = expectedPages
                         )
+                        continue
+                    }
+
+                    val pageNum = index + 1
+                    val remainingPages = (expectedPages - savedPathsByIndex.size).coerceAtLeast(1)
+                    val etaSec = (remainingPages * 2).coerceAtLeast(1)
+                    val progressFloat = ((savedPathsByIndex.size.toFloat() / expectedPages.toFloat()) * 100f).coerceIn(0f, 99f)
+
+                    updateProgressInDb(
+                        taskId = taskId,
+                        work = work,
+                        chapter = chapter,
+                        chapterKey = chapterKey,
+                        localCoverPath = localCoverPath,
+                        expectedPages = expectedPages,
+                        downloadedCount = savedPathsByIndex.size,
+                        localPaths = savedPathsByIndex.values.toList(),
+                        bytesSoFar = cumulativeBytes,
+                        progressFloat = progressFloat,
+                        etaSeconds = etaSec
+                    )
+
+                    val pageBytes = downloadSingleImageBytesWithRetry(
+                        imageUrl = pageUrl,
+                        refererUrl = chapter.chapterUrl.ifBlank { work.mangaUrl.ifBlank { work.siteUrl } },
+                        siteUrl = work.siteUrl,
+                        workId = work.id,
+                        chapterId = chapter.id,
+                        workTitle = work.title,
+                        chapterTitle = chapter.title,
+                        pageNumber = pageNum
+                    )
+
+                    if (pageBytes != null && storageManager.isValidChapterPageImageBytes(pageBytes)) {
+                        val ext = guessImageExtension(pageUrl, pageBytes)
+                        val savedFile = storageManager.saveChapterPageImage(
+                            sourceId = work.sourceId,
+                            workId = work.id,
+                            chapterKey = chapterKey,
+                            pageIndex = index,
+                            bytes = pageBytes,
+                            extension = ext,
+                            compressToWebp = compressDownloadsWebp
+                        )
+                        if (storageManager.isValidImageFile(savedFile)) {
+                            savedPathsByIndex[index] = savedFile.absolutePath
+                            cumulativeBytes += savedFile.length()
+                            notificationHelper?.showDownloadProgress(
+                                taskId = taskKeyStr,
+                                workId = work.id,
+                                workTitle = work.title,
+                                chapterNumber = chapter.number,
+                                downloadedPages = savedPathsByIndex.size,
+                                totalPages = expectedPages
+                            )
+                        } else {
+                            failedPageNumbers.add(pageNum)
+                            DiagnosticLogger.logError(
+                                category = DiagnosticCategory.STORAGE,
+                                message = "فشل التحقق من ملف الصفحة $pageNum بعد الحفظ",
+                                workId = work.id,
+                                chapterId = chapter.id,
+                                pageNumber = pageNum,
+                                url = pageUrl
+                            )
+                        }
                     } else {
                         failedPageNumbers.add(pageNum)
-                        DiagnosticLogger.logError(
-                            category = DiagnosticCategory.STORAGE,
-                            message = "فشل التحقق من ملف الصفحة $pageNum بعد الحفظ",
-                            workId = work.id,
-                            chapterId = chapter.id,
-                            pageNumber = pageNum,
-                            url = pageUrl
-                        )
                     }
-                } else {
-                    failedPageNumbers.add(pageNum)
+                }
+
+                if (failedPageNumbers.isEmpty()) {
+                    break
                 }
             }
+
+            val savedLocalPaths = savedPathsByIndex.values.toList()
 
             // Strictly verify every single required page exists on disk before marking COMPLETED
             val isComplete = failedPageNumbers.isEmpty() &&
@@ -907,7 +944,8 @@ class MangaDownloadManager(
         chapterTitle: String,
         pageNumber: Int
     ): ByteArray? {
-        for (attempt in 1..3) {
+        val maxAttempts = 4
+        for (attempt in 1..maxAttempts) {
             val bytes = downloadSingleImageBytes(
                 imageUrl = imageUrl,
                 refererUrl = refererUrl,
@@ -922,8 +960,8 @@ class MangaDownloadManager(
             if (bytes != null && storageManager.isValidImageBytes(bytes)) {
                 return bytes
             }
-            if (attempt < 3 && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
-                delay(250L * attempt)
+            if (attempt < maxAttempts && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
+                delay(300L * attempt)
             }
         }
         return null
@@ -938,7 +976,8 @@ class MangaDownloadManager(
         workTitle: String,
         chapterTitle: String,
         pageNumber: Int,
-        attempt: Int
+        attempt: Int,
+        unwrappedHtmlDepth: Int = 0
     ): ByteArray? {
         if (imageUrl.startsWith("offline://") || imageUrl.startsWith("test://")) {
             if (imageUrl.contains("fail") || imageUrl.contains("missing")) {
@@ -967,11 +1006,16 @@ class MangaDownloadManager(
         }
 
         return try {
-            val cleanUrl = imageUrl.trim().replace(" ", "%20")
+            val cleanUrl = imageUrl.trim()
+                .replace("\r", "")
+                .replace("\n", "")
+                .replace("\t", "")
+                .replace(" ", "%20")
             val siteOriginReferer = siteUrl.trim().trimEnd('/') + "/"
             val effectiveReferer = when (attempt) {
                 1 -> refererUrl.ifBlank { siteOriginReferer }.trim()
                 2 -> siteOriginReferer
+                3 -> cleanUrl.substringBeforeLast('/', siteOriginReferer) + "/"
                 else -> ""
             }
             val cleanUserAgent = LiveMangaSiteScraper.activeUserAgent
@@ -1010,8 +1054,61 @@ class MangaDownloadManager(
                     )
                     return null
                 }
-                val contentType = response.header("Content-Type")
+                val contentType = response.header("Content-Type").orEmpty()
+                val expectedLength = response.header("Content-Length")?.toLongOrNull() ?: -1L
                 val bodyBytes = response.body?.bytes() ?: return null
+
+                // Detect partial/truncated HTTP byte transfers so retry kicks in automatically
+                if (expectedLength > 0L && bodyBytes.size.toLong() < expectedLength) {
+                    DiagnosticLogger.logError(
+                        category = DiagnosticCategory.NETWORK,
+                        message = "فشل التحميل الجزئي للصورة (المستلم ${bodyBytes.size} من أصل $expectedLength بايت) — سيتم إعادة المحاولة",
+                        workId = workId,
+                        chapterId = chapterId,
+                        pageNumber = if (pageNumber > 0) pageNumber else null,
+                        url = cleanUrl,
+                        httpCode = code
+                    )
+                    return null
+                }
+
+                // If server returned an HTML page instead of raw image bytes, extract the actual <img src> via OkHttp
+                if (unwrappedHtmlDepth == 0 && contentType.contains("text/html", ignoreCase = true)) {
+                    val html = bodyBytes.toString(Charsets.UTF_8)
+                    val extractedImgUrls = LiveMangaSiteScraper.extractImgTagSrcUrls(html, cleanUrl)
+                        .ifEmpty { LiveMangaSiteScraper.parseChapterPagesHtml(html, cleanUrl) }
+                        .filter { it.startsWith("http") && !it.equals(cleanUrl, ignoreCase = true) }
+
+                    val targetImgSrc = if (pageNumber > 0 && extractedImgUrls.size >= pageNumber) {
+                        extractedImgUrls[pageNumber - 1]
+                    } else {
+                        extractedImgUrls.firstOrNull()
+                    }
+
+                    if (!targetImgSrc.isNullOrBlank()) {
+                        DiagnosticLogger.logInfo(
+                            category = DiagnosticCategory.DOWNLOAD,
+                            message = "تم استخراج رابط الصورة الفعلي من وسم <img> (src) داخل الصفحة: $targetImgSrc",
+                            workId = workId,
+                            chapterId = chapterId,
+                            pageNumber = if (pageNumber > 0) pageNumber else null,
+                            url = targetImgSrc
+                        )
+                        return downloadSingleImageBytes(
+                            imageUrl = targetImgSrc,
+                            refererUrl = cleanUrl,
+                            siteUrl = siteUrl,
+                            workId = workId,
+                            chapterId = chapterId,
+                            workTitle = workTitle,
+                            chapterTitle = chapterTitle,
+                            pageNumber = pageNumber,
+                            attempt = attempt,
+                            unwrappedHtmlDepth = unwrappedHtmlDepth + 1
+                        )
+                    }
+                }
+
                 val isValidPayload = if (pageNumber > 0) {
                     !LiveMangaSiteScraper.isIgnoredAssetImage(cleanUrl) &&
                         storageManager.isValidChapterPageImageBytes(bodyBytes, contentType)

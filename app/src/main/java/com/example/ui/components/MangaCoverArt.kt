@@ -101,6 +101,7 @@ object MangaCoilImageLoader {
         }
         val okHttp = LiveMangaSiteScraper.httpClient.newBuilder()
             .dispatcher(dispatcher)
+            .retryOnConnectionFailure(true)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .followRedirects(true)
@@ -143,7 +144,36 @@ object MangaCoilImageLoader {
                         url = reqUrl,
                         httpCode = response.code
                     )
-                } else if (contentType.contains("text/html") || contentType.contains("application/json")) {
+                } else if (contentType.contains("text/html")) {
+                    // Extract the actual image URL from <img> tags (src / data-src) instead of loading full HTML
+                    val html = runCatching { response.body?.string().orEmpty() }.getOrDefault("")
+                    response.close()
+                    val unwrappedImgUrl = LiveMangaSiteScraper.extractImgTagSrcUrls(html, reqUrl)
+                        .firstOrNull { it.startsWith("http") && !it.equals(reqUrl, ignoreCase = true) }
+                    if (!unwrappedImgUrl.isNullOrBlank()) {
+                        val imgReqBuilder = original.newBuilder()
+                            .url(unwrappedImgUrl)
+                            .header("User-Agent", cleanUa)
+                            .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                            .header("Referer", reqUrl)
+                        val imgCookies = LiveMangaSiteScraper.getCombinedCookies(
+                            targetUrl = unwrappedImgUrl,
+                            refererUrl = reqUrl
+                        )
+                        if (imgCookies.isNotBlank()) {
+                            imgReqBuilder.header("Cookie", imgCookies)
+                        }
+                        response = chain.proceed(imgReqBuilder.build())
+                    } else {
+                        DiagnosticLogger.logError(
+                            category = DiagnosticCategory.READER,
+                            message = "استجابة غير صالحة للصورة (نوع المحتوى: $contentType)",
+                            url = reqUrl,
+                            httpCode = response.code
+                        )
+                        throw java.io.IOException("استجابة الخادم ليست صورة صالحة ($contentType)")
+                    }
+                } else if (contentType.contains("application/json")) {
                     response.close()
                     DiagnosticLogger.logError(
                         category = DiagnosticCategory.READER,

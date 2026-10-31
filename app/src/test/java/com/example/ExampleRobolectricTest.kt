@@ -701,5 +701,43 @@ class ExampleRobolectricTest {
 
         db.close()
     }
+
+    @Test
+    fun verifyMangatekImgSrcExtractionAndNonImageUrlFiltering() {
+        val mangatekChapterHtml = """
+            <html>
+            <head>
+                <script>
+                    var chapter_Data = ["https://mangatek.com/manga/logging-10000-years/chapter-1", "https://mangatek.com/manga/logging-10000-years/chapter-3"];
+                </script>
+            </head>
+            <body>
+                <div class="reading-content">
+                    <div class="page-break no-gaps">
+                        <img id="image-0" src="
+                            https://mangatek.com/wp-content/uploads/WP-manga/data/manga_65/ch2/001.webp
+                        " class="wp-manga-chapter-img" />
+                    </div>
+                    <div class="page-break no-gaps">
+                        <img id="image-1" src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" data-src="https://mangatek.com/wp-content/uploads/WP-manga/data/manga_65/ch2/002.jpg" class="wp-manga-chapter-img lazyload" />
+                    </div>
+                    <div class="page-break no-gaps">
+                        <img id="image-2" data-lazy-src="https://mangatek.com/wp-content/uploads/WP-manga/data/manga_65/ch2/003.png" src="https://mangatek.com/assets/lazy-placeholder.gif" class="wp-manga-chapter-img" />
+                    </div>
+                </div>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val pages = LiveMangaSiteScraper.parseChapterPagesHtml(
+            html = mangatekChapterHtml,
+            chapterUrl = "https://mangatek.com/manga/logging-10000-years/chapter-2/"
+        )
+
+        assertEquals(3, pages.size)
+        assertEquals("https://mangatek.com/wp-content/uploads/WP-manga/data/manga_65/ch2/001.webp", pages[0])
+        assertEquals("https://mangatek.com/wp-content/uploads/WP-manga/data/manga_65/ch2/002.jpg", pages[1])
+        assertEquals("https://mangatek.com/wp-content/uploads/WP-manga/data/manga_65/ch2/003.png", pages[2])
+    }
 }
 

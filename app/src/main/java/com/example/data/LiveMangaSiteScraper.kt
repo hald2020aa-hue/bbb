@@ -280,10 +280,33 @@ object LiveMangaSiteScraper {
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .dns(dohAwareDns)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .followRedirects(true)
         .followSslRedirects(true)
+        .addInterceptor { chain ->
+            val request = chain.request()
+            var lastException: java.io.IOException? = null
+            for (attempt in 1..3) {
+                try {
+                    val response = chain.proceed(request)
+                    if (response.isSuccessful || response.code !in listOf(408, 429, 500, 502, 503, 504) || attempt == 3) {
+                        return@addInterceptor response
+                    }
+                    response.close()
+                } catch (e: java.io.IOException) {
+                    lastException = e
+                    if (attempt == 3) throw e
+                }
+                try {
+                    Thread.sleep(250L * attempt)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            throw (lastException ?: java.io.IOException("فشل الاتصال بعد إعادة المحاولة"))
+        }
         .build()
 
     fun getCookiesForUrl(url: String): String {
@@ -359,22 +382,24 @@ object LiveMangaSiteScraper {
     }
 
     fun resolveUrl(baseUrl: String, rawHref: String): String {
-        val cleaned = rawHref.trim()
+        val cleaned = rawHref
+            .replace(Regex("[\\r\\n\\t]+"), "")
+            .trim { it <= ' ' || it == '\'' || it == '"' }
             .replace("&amp;", "&")
             .removePrefix("url(")
             .removeSuffix(")")
-            .trim('\'', '"', ' ')
-        if (cleaned.isEmpty() || cleaned.startsWith("javascript:") || cleaned.startsWith("data:") || cleaned.startsWith("#")) {
+            .trim { it <= ' ' || it == '\'' || it == '"' }
+        if (cleaned.isEmpty() || cleaned.startsWith("javascript:", ignoreCase = true) || cleaned.startsWith("data:", ignoreCase = true) || cleaned.startsWith("#")) {
             return ""
         }
-        if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
+        if (cleaned.startsWith("http://", ignoreCase = true) || cleaned.startsWith("https://", ignoreCase = true)) {
             return cleaned.replace(" ", "%20")
         }
         if (cleaned.startsWith("//")) {
             return "https:${cleaned.replace(" ", "%20")}"
         }
         return try {
-            val baseUri = URI(baseUrl.trimEnd('/'))
+            val baseUri = URI(baseUrl.trim())
             val scheme = baseUri.scheme ?: "https"
             val host = baseUri.host ?: return cleaned.replace(" ", "%20")
             val portPart = if (baseUri.port != -1 && baseUri.port != 80 && baseUri.port != 443) ":${baseUri.port}" else ""
@@ -383,7 +408,12 @@ object LiveMangaSiteScraper {
             if (normPath.startsWith("/")) {
                 "$origin$normPath"
             } else {
-                "$origin/$normPath"
+                val basePath = baseUri.path?.substringBeforeLast('/', "").orEmpty()
+                if (basePath.isNotBlank()) {
+                    "$origin${if (basePath.startsWith("/")) basePath else "/$basePath"}/$normPath"
+                } else {
+                    "$origin/$normPath"
+                }
             }
         } catch (_: Exception) {
             cleaned.replace(" ", "%20")
@@ -1421,18 +1451,21 @@ object LiveMangaSiteScraper {
 
     suspend fun fetchChapterPages(
         work: MangaWork,
-        chapter: MangaChapter
+        chapter: MangaChapter,
+        forceRefresh: Boolean = false
     ): ChapterPagesScrapeResult = withContext(Dispatchers.IO) {
         val targetUrl = chapter.chapterUrl.ifBlank {
             "${work.siteUrl.trimEnd('/')}/series/${work.id}/${chapter.displayNumber}"
         }
-        // 1. Check in-memory chapter pages cache first (populated by Reader or previous extraction)
-        val cached = getCachedChapterPages(targetUrl)
-        if (cached.isNotEmpty()) {
-            return@withContext ChapterPagesScrapeResult(
-                pageUrls = cached,
-                requiresCloudflare = false
-            )
+        // 1. Check in-memory chapter pages cache first (unless forceRefresh is requested on partial retry)
+        if (!forceRefresh) {
+            val cached = getCachedChapterPages(targetUrl)
+            if (cached.isNotEmpty()) {
+                return@withContext ChapterPagesScrapeResult(
+                    pageUrls = cached,
+                    requiresCloudflare = false
+                )
+            }
         }
 
         try {
@@ -1555,10 +1588,26 @@ object LiveMangaSiteScraper {
     }
 
     /**
-     * يستخرج جميع روابط صور الفصل بالترتيب الأصلي مع إزالة الروابط المكررة،
-     * ويعزل حاوية القارئ الفعلية ويستبعد الإيموجي (مثل wp-smiley / twemoji / s.w.org / reactions)
-     * والشعارات والإعلانات والصور البديلة الصغيرة.
+     * يستخرج روابط الصور الفعلية للفصل مباشرة من وسوم `<img>` (سمات `src` و `data-src` و `data-lazy-src` و `data-original` و `srcset`)
+     * عبر مكتبة OkHttp بدلاً من جلب كامل محتوى الصفحة كملف نصي.
      */
+    fun extractImgTagSrcUrls(html: String, baseUrl: String): List<String> {
+        if (html.isBlank()) return emptyList()
+        val urls = LinkedHashSet<String>()
+        val normChapterUrl = normalizeChapterUrlKey(baseUrl)
+        Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE).findAll(html).forEach { match ->
+            val tag = match.value
+            val (resolvedUrl, _) = extractBestImageUrlWithAttr(tag, baseUrl)
+            if (resolvedUrl.isNotBlank() &&
+                normalizeChapterUrlKey(resolvedUrl) != normChapterUrl &&
+                getCandidateRejectionReason(resolvedUrl, tagHtml = tag, isInsideReaderContainer = true) == null
+            ) {
+                urls.add(resolvedUrl)
+            }
+        }
+        return urls.toList()
+    }
+
     fun parseChapterPagesHtml(html: String, chapterUrl: String): List<String> {
         return parseChapterPagesWithDiagnostics(html, chapterUrl).pageUrls
     }
@@ -1567,56 +1616,12 @@ object LiveMangaSiteScraper {
         if (html.isBlank()) return ChapterPagesScrapeResult(emptyList())
         val images = LinkedHashSet<String>()
         val diagnostics = mutableListOf<PageCandidateDiagnostic>()
+        val normChapterUrl = normalizeChapterUrlKey(chapterUrl)
 
-        // 1. Check ts_reader.run({... "images": [...] }), chapter_preloaded_images, Next.js/Nuxt state, or JSON arrays of page URLs
-        val jsonArrayPatterns = listOf(
-            Regex("""["'](?:images|pages|page_urls|chapter_images|chapterImages|files|imgs)["']\s*:\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE),
-            Regex("""(?:chapter_preloaded_images|chapterImages|pagesList|image_list|chapter_images|pages)\s*=\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE)
-        )
-        for (pattern in jsonArrayPatterns) {
-            pattern.findAll(html).forEach { match ->
-                val arrayContent = match.groupValues[1]
-                Regex("""["']((?:https?:)?(?:\\/|/){2}[^"'\s]+|(?:\\/|/)[^"'\s]+)["']""", RegexOption.IGNORE_CASE)
-                    .findAll(arrayContent)
-                    .forEach { urlMatch ->
-                        val rawUrl = urlMatch.groupValues[1]
-                            .replace("\\/", "/")
-                            .replace("\\u002F", "/")
-                            .replace("\\u0026", "&")
-                            .trim()
-                        val resolved = resolveUrl(chapterUrl, rawUrl)
-                        val rejection = getCandidateRejectionReason(resolved, tagHtml = "<script json>", isInsideReaderContainer = true)
-                        if (rejection == null) {
-                            images.add(resolved)
-                            diagnostics.add(
-                                PageCandidateDiagnostic(
-                                    rawUrl = rawUrl,
-                                    resolvedUrl = resolved,
-                                    sourceElement = "script-json-array",
-                                    attributeUsed = "json",
-                                    accepted = true,
-                                    reason = "رابط صفحة فصل صالح داخل مصفوفة القارئ"
-                                )
-                            )
-                        } else {
-                            diagnostics.add(
-                                PageCandidateDiagnostic(
-                                    rawUrl = rawUrl,
-                                    resolvedUrl = resolved,
-                                    sourceElement = "script-json-array",
-                                    attributeUsed = "json",
-                                    accepted = false,
-                                    reason = rejection
-                                )
-                            )
-                        }
-                    }
-            }
-        }
-
-        // 2. Isolate dedicated reader containers first (supporting Madara, MangaStream, Mangatek, Azora, Team-X, etc.)
+        // 1. PRIMARY: Isolate dedicated reader containers first and extract actual <img> tag src / data-src URLs
+        // (Supports https://mangatek.com/, Madara, MangaStream, Azora, Team-X, etc.)
         val dedicatedReaderRegex = Regex(
-            """<(?:div|section|main|article)[^>]+(?:id|class)=["'][^"']*(?:reading-content|readerarea|chapter-content|images_chapter|vung-doc|container-chapter-reader|rdminimal|chapter-reader|reader-area|chapter-images|chapter-imgs|reader-content|manga-reader|page-list|ch-images|read-container|images-container|chapter-body|viewer-cnt|reader-main)[^"']*["'][^>]*>""",
+            """<(?:div|section|main|article)[^>]+(?:id|class)=["'][^"']*(?:reading-content|readerarea|chapter-content|images_chapter|vung-doc|container-chapter-reader|rdminimal|chapter-reader|reader-area|chapter-images|chapter-imgs|reader-content|manga-reader|page-list|ch-images|read-container|images-container|chapter-body|viewer-cnt|reader-main|mangatek-reader|chapter-pages)[^"']*["'][^>]*>""",
             RegexOption.IGNORE_CASE
         )
         val fallbackEntryContentRegex = Regex(
@@ -1632,19 +1637,19 @@ object LiveMangaSiteScraper {
                 """<(?:div|section|footer|aside|nav)[^>]+(?:id|class)=["'][^"']*(?:comments-area|disqus_thread|wpdiscuz|wp-reactions|reactions-container|c-blog__heading|related-manga|related-posts|manga-discussion|wp-manga-nav|site-footer|footer-area|sharedaddy|post-ratings)[^"']*["']""",
                 RegexOption.IGNORE_CASE
             )
-            val endOffset = footerBoundaryRegex.find(tailHtml)?.range?.first ?: minOf(tailHtml.length, 380_000)
+            val endOffset = footerBoundaryRegex.find(tailHtml)?.range?.first ?: minOf(tailHtml.length, 420_000)
             val readerSectionHtml = stripNonReaderBlocksFromFragment(tailHtml.substring(0, endOffset))
             extractAndValidateImagesFromFragment(
                 fragment = readerSectionHtml,
                 baseUrl = chapterUrl,
-                sourceContainerName = "reader-container",
+                sourceContainerName = "reader-container-img",
                 isInsideReaderContainer = true,
                 images = images,
                 diagnostics = diagnostics
             )
         }
 
-        // 3. Scan explicit .page-break / .chapter-image blocks across the document
+        // 2. Scan explicit .page-break / .chapter-image blocks across the document for <img> tags
         val pageBreakRegex = Regex(
             """<div[^>]+class=["'][^"']*(?:page-break|image-item|chapter-image|page-item|reader-image|page-img-wrap)[^"']*["'][^>]*>([\s\S]*?)</div>""",
             RegexOption.IGNORE_CASE
@@ -1653,15 +1658,15 @@ object LiveMangaSiteScraper {
             extractAndValidateImagesFromFragment(
                 fragment = match.groupValues[1],
                 baseUrl = chapterUrl,
-                sourceContainerName = "page-break",
+                sourceContainerName = "page-break-img",
                 isInsideReaderContainer = true,
                 images = images,
                 diagnostics = diagnostics
             )
         }
 
-        // 4. Scan explicit reader <img> tags
-        val imgTagRegex = Regex("""<img[^>]+>""", RegexOption.IGNORE_CASE)
+        // 3. Scan explicit reader <img> tags across the document (wp-manga-chapter-img, chapter-img, page-img, etc.)
+        val imgTagRegex = Regex("""<img\b[^>]+>""", RegexOption.IGNORE_CASE)
         imgTagRegex.findAll(html).forEach { match ->
             val tag = match.value
             val isExplicitReaderImg = tag.contains("wp-manga-chapter-img", ignoreCase = true) ||
@@ -1671,10 +1676,11 @@ object LiveMangaSiteScraper {
                 tag.contains("reader-img", ignoreCase = true) ||
                 tag.contains("manga-page", ignoreCase = true) ||
                 tag.contains("data-page=", ignoreCase = true) ||
-                tag.contains("data-index=", ignoreCase = true)
+                tag.contains("data-index=", ignoreCase = true) ||
+                tag.contains("image-", ignoreCase = true)
 
             val extracted = extractBestImageUrlWithAttr(tag, chapterUrl)
-            if (isExplicitReaderImg) {
+            if (isExplicitReaderImg && extracted.first.isNotBlank() && normalizeChapterUrlKey(extracted.first) != normChapterUrl) {
                 val rejection = getCandidateRejectionReason(extracted.first, tagHtml = tag, isInsideReaderContainer = true)
                 if (rejection == null) {
                     images.add(extracted.first)
@@ -1685,7 +1691,7 @@ object LiveMangaSiteScraper {
                             sourceElement = "explicit-reader-img",
                             attributeUsed = extracted.second,
                             accepted = true,
-                            reason = "وسم صورة فصل صريح"
+                            reason = "وسم <img> لصورة فصل صريح (${extracted.second})"
                         )
                     )
                 } else {
@@ -1717,8 +1723,8 @@ object LiveMangaSiteScraper {
             }
         }
 
-        // 5. Fallback for custom site themes (e.g. mangatek.com custom reader layouts):
-        // If no dedicated reader container class matched yet, strip header/footer/nav/comments/sidebar and extract valid content images!
+        // 4. Fallback for custom site themes (e.g. mangatek.com custom reader layouts):
+        // Strip header/footer/nav/comments/sidebar and extract valid <img> src tags from the body!
         if (images.isEmpty()) {
             val strippedBody = stripNonReaderBlocksFromFragment(
                 html.replace(Regex("""<(?:header|footer|nav|aside)[^>]*>[\s\S]*?</(?:header|footer|nav|aside)>""", RegexOption.IGNORE_CASE), "")
@@ -1726,7 +1732,7 @@ object LiveMangaSiteScraper {
             imgTagRegex.findAll(strippedBody).forEach { match ->
                 val tag = match.value
                 val (resolvedUrl, attrUsed) = extractBestImageUrlWithAttr(tag, chapterUrl)
-                if (resolvedUrl.isNotBlank()) {
+                if (resolvedUrl.isNotBlank() && normalizeChapterUrlKey(resolvedUrl) != normChapterUrl) {
                     val rejection = getCandidateRejectionReason(
                         imgUrl = resolvedUrl,
                         tagHtml = tag,
@@ -1738,13 +1744,65 @@ object LiveMangaSiteScraper {
                             PageCandidateDiagnostic(
                                 rawUrl = resolvedUrl,
                                 resolvedUrl = resolvedUrl,
-                                sourceElement = "body-fallback",
+                                sourceElement = "body-img-fallback",
                                 attributeUsed = attrUsed,
                                 accepted = true,
-                                reason = "صورة صفحة فصل صالحة من محتوى الصفحة"
+                                reason = "صورة صفحة فصل صالحة من وسم <img> ($attrUsed)"
                             )
                         )
                     }
+                }
+            }
+        }
+
+        // 5. Check script JSON arrays (ts_reader.run, chapter_preloaded_images, chapterImages) ONLY if <img> tags
+        // did not already yield the chapter pages, and strictly require direct image extensions/paths so HTML page URLs are never added!
+        if (images.isEmpty()) {
+            val jsonArrayPatterns = listOf(
+                Regex("""["'](?:images|page_urls|chapter_images|chapterImages|imgs)["']\s*:\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE),
+                Regex("""(?:chapter_preloaded_images|chapterImages|pagesList|image_list|chapter_images)\s*=\s*\[([\s\S]*?)\]""", RegexOption.IGNORE_CASE)
+            )
+            for (pattern in jsonArrayPatterns) {
+                pattern.findAll(html).forEach { match ->
+                    val arrayContent = match.groupValues[1]
+                    Regex("""["']((?:https?:)?(?:\\/|/){2}[^"'\s]+|(?:\\/|/)[^"'\s]+)["']""", RegexOption.IGNORE_CASE)
+                        .findAll(arrayContent)
+                        .forEach { urlMatch ->
+                            val rawUrl = urlMatch.groupValues[1]
+                                .replace("\\/", "/")
+                                .replace("\\u002F", "/")
+                                .replace("\\u0026", "&")
+                                .trim()
+                            val resolved = resolveUrl(chapterUrl, rawUrl)
+                            val rejection = getCandidateRejectionReason(resolved, tagHtml = "<script json>", isInsideReaderContainer = true)
+                            if (rejection == null &&
+                                normalizeChapterUrlKey(resolved) != normChapterUrl &&
+                                isVerifiedDirectImageUrl(resolved)
+                            ) {
+                                images.add(resolved)
+                                diagnostics.add(
+                                    PageCandidateDiagnostic(
+                                        rawUrl = rawUrl,
+                                        resolvedUrl = resolved,
+                                        sourceElement = "script-json-array",
+                                        attributeUsed = "json",
+                                        accepted = true,
+                                        reason = "رابط صورة مباشر داخل مصفوفة القارئ"
+                                    )
+                                )
+                            } else {
+                                diagnostics.add(
+                                    PageCandidateDiagnostic(
+                                        rawUrl = rawUrl,
+                                        resolvedUrl = resolved,
+                                        sourceElement = "script-json-array",
+                                        attributeUsed = "json",
+                                        accepted = false,
+                                        reason = rejection ?: "ليس رابط صورة مباشر"
+                                    )
+                                )
+                            }
+                        }
                 }
             }
         }
@@ -1753,6 +1811,16 @@ object LiveMangaSiteScraper {
             pageUrls = images.toList(),
             diagnostics = diagnostics
         )
+    }
+
+    internal fun isVerifiedDirectImageUrl(url: String): Boolean {
+        val lower = url.lowercase(Locale.ROOT).substringBefore("?").substringBefore("#")
+        val imageExts = listOf(".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif", ".bmp")
+        if (imageExts.any { lower.endsWith(it) }) return true
+        return lower.contains("/wp-content/uploads/") ||
+            lower.contains("/wp-manga/data/") ||
+            lower.contains("/uploads/manga") ||
+            lower.contains("/uploads/chapters")
     }
 
     private fun stripNonReaderBlocksFromFragment(fragment: String): String {
@@ -2962,6 +3030,14 @@ object LiveMangaSiteScraper {
         return extractBestImageUrlWithAttr(fragment, baseUrl).first
     }
 
+    private fun isPlaceholderImageAttrValue(raw: String): Boolean {
+        val lower = raw.trim().lowercase(Locale.ROOT)
+        if (lower.isBlank()) return true
+        if (lower.startsWith("data:image") || lower.startsWith("javascript:") || lower.startsWith("about:")) return true
+        val placeholders = listOf("placeholder", "loading", "preloader", "spacer", "blank.", "1x1", "lazy.")
+        return placeholders.any { lower.contains(it) }
+    }
+
     private fun extractBestImageUrlWithAttr(fragment: String, baseUrl: String): Pair<String, String> {
         val singleUrlAttributes = listOf(
             "data-src",
@@ -2975,10 +3051,15 @@ object LiveMangaSiteScraper {
         )
         for (attr in singleUrlAttributes) {
             val raw = extractAttribute(fragment, attr).trim()
-            if (raw.isNotBlank() && !raw.startsWith("data:image", ignoreCase = true)) {
+            if (!isPlaceholderImageAttrValue(raw)) {
                 val resolved = resolveUrl(baseUrl, raw)
                 if (resolved.isNotBlank()) return resolved to attr
             }
+        }
+        val rawSrc = extractAttribute(fragment, "src").trim()
+        if (!isPlaceholderImageAttrValue(rawSrc)) {
+            val resolved = resolveUrl(baseUrl, rawSrc)
+            if (resolved.isNotBlank()) return resolved to "src"
         }
         val srcsetAttributes = listOf("data-srcset", "srcset")
         for (attr in srcsetAttributes) {
@@ -2988,11 +3069,6 @@ object LiveMangaSiteScraper {
                 val resolved = resolveUrl(baseUrl, bestCandidate)
                 if (resolved.isNotBlank()) return resolved to attr
             }
-        }
-        val rawSrc = extractAttribute(fragment, "src").trim()
-        if (rawSrc.isNotBlank() && !rawSrc.startsWith("data:image", ignoreCase = true)) {
-            val resolved = resolveUrl(baseUrl, rawSrc)
-            if (resolved.isNotBlank()) return resolved to "src"
         }
         val bgRegex = Regex("""background-image\s*:\s*url\(([^)]+)\)""", RegexOption.IGNORE_CASE)
         val bgMatch = bgRegex.find(fragment)?.groupValues?.getOrNull(1)
@@ -3031,8 +3107,14 @@ object LiveMangaSiteScraper {
     }
 
     private fun extractAttribute(tagOrFragment: String, attrName: String): String {
-        val regex = Regex("""\b$attrName\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-        return regex.find(tagOrFragment)?.groupValues?.getOrNull(1)?.trim() ?: ""
+        // Strictly match standalone attribute name (prevents "src" from matching "data-src" or "data-lazy-src"!)
+        val quotedRegex = Regex("""(?:^|[\s"'<>])$attrName\s*=\s*["']([\s\S]*?)["']""", RegexOption.IGNORE_CASE)
+        val quotedMatch = quotedRegex.find(tagOrFragment)?.groupValues?.getOrNull(1)
+        if (quotedMatch != null) {
+            return quotedMatch.replace(Regex("[\\r\\n\\t]+"), "").trim()
+        }
+        val unquotedRegex = Regex("""(?:^|[\s"'<>])$attrName\s*=\s*([^\s"'<>]+)""", RegexOption.IGNORE_CASE)
+        return unquotedRegex.find(tagOrFragment)?.groupValues?.getOrNull(1)?.trim() ?: ""
     }
 
     private fun extractMetaProperty(html: String, prop: String): String {
