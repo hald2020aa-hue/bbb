@@ -59,8 +59,10 @@ data class UserSettings(
     val preloadNextChapter: Boolean = true,
     val tapZoneMode: String = "افتراضي (يمين/يسار/منتصف)", // "افتراضي (يمين/يسار/منتصف)", "معكوس (يسار للتالي)", "منتصف فقط للقائمة", "شبيه كيندل"
     // Downloads & Offline Storage
+    val preferredDownloadFormat: String = "تلقائي", // "تلقائي", "ملف CBZ واحد", "ملفات CBZ متعددة"
     val autoDeleteReadChapters: Boolean = false,
     val keepLastReadChaptersCount: Int = 2,
+    val foldableCompactScale: Boolean = true,
     // Network & DNS over HTTPS (DoH)
     val dohProvider: String = "معطل", // "معطل", "Cloudflare (1.1.1.1)", "Google (8.8.8.8)", "AdGuard"
     // Global Tracking (AniList / MyAnimeList)
@@ -119,8 +121,10 @@ class UserSettingsDataStore(private val context: Context) {
         val AUTO_CROP_BORDERS = booleanPreferencesKey("auto_crop_borders")
         val PRELOAD_NEXT_CHAPTER = booleanPreferencesKey("preload_next_chapter")
         val TAP_ZONE_MODE = stringPreferencesKey("tap_zone_mode")
+        val PREFERRED_DOWNLOAD_FORMAT = stringPreferencesKey("preferred_download_format")
         val AUTO_DELETE_READ_CHAPTERS = booleanPreferencesKey("auto_delete_read_chapters")
         val KEEP_LAST_READ_CHAPTERS_COUNT = intPreferencesKey("keep_last_read_chapters_count")
+        val FOLDABLE_COMPACT_SCALE = booleanPreferencesKey("foldable_compact_scale")
         val DOH_PROVIDER = stringPreferencesKey("doh_provider")
         val ANILIST_USERNAME = stringPreferencesKey("anilist_username")
         val ANILIST_TOKEN = stringPreferencesKey("anilist_token")
@@ -175,8 +179,10 @@ class UserSettingsDataStore(private val context: Context) {
             autoCropBorders = prefs[Keys.AUTO_CROP_BORDERS] ?: false,
             preloadNextChapter = prefs[Keys.PRELOAD_NEXT_CHAPTER] ?: true,
             tapZoneMode = prefs[Keys.TAP_ZONE_MODE] ?: "افتراضي (يمين/يسار/منتصف)",
+            preferredDownloadFormat = prefs[Keys.PREFERRED_DOWNLOAD_FORMAT] ?: "تلقائي",
             autoDeleteReadChapters = prefs[Keys.AUTO_DELETE_READ_CHAPTERS] ?: false,
             keepLastReadChaptersCount = prefs[Keys.KEEP_LAST_READ_CHAPTERS_COUNT] ?: 2,
+            foldableCompactScale = prefs[Keys.FOLDABLE_COMPACT_SCALE] ?: true,
             dohProvider = prefs[Keys.DOH_PROVIDER] ?: "معطل",
             anilistUsername = prefs[Keys.ANILIST_USERNAME] ?: "",
             anilistToken = prefs[Keys.ANILIST_TOKEN] ?: "",
@@ -203,6 +209,7 @@ class UserSettingsDataStore(private val context: Context) {
                 "userProfileName" -> prefs[Keys.USER_PROFILE_NAME] = value
                 "userProfileEmail" -> prefs[Keys.USER_PROFILE_EMAIL] = value
                 "tapZoneMode" -> prefs[Keys.TAP_ZONE_MODE] = value
+                "preferredDownloadFormat" -> prefs[Keys.PREFERRED_DOWNLOAD_FORMAT] = value
                 "dohProvider" -> prefs[Keys.DOH_PROVIDER] = value
                 "anilistUsername" -> prefs[Keys.ANILIST_USERNAME] = value
                 "anilistToken" -> prefs[Keys.ANILIST_TOKEN] = value
@@ -241,6 +248,7 @@ class UserSettingsDataStore(private val context: Context) {
                 "autoCropBorders" -> prefs[Keys.AUTO_CROP_BORDERS] = value
                 "preloadNextChapter" -> prefs[Keys.PRELOAD_NEXT_CHAPTER] = value
                 "autoDeleteReadChapters" -> prefs[Keys.AUTO_DELETE_READ_CHAPTERS] = value
+                "foldableCompactScale" -> prefs[Keys.FOLDABLE_COMPACT_SCALE] = value
                 "autoSyncTracking" -> prefs[Keys.AUTO_SYNC_TRACKING] = value
                 "anilistTrackingEnabled" -> prefs[Keys.ANILIST_TRACKING_ENABLED] = value
                 "malTrackingEnabled" -> prefs[Keys.MAL_TRACKING_ENABLED] = value

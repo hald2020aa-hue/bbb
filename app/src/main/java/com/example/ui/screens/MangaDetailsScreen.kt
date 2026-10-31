@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -242,8 +243,8 @@ fun MangaDetailsScreen(
         resumeLabel.ifBlank { effectiveResumeChapter?.lastReadTimeText ?: "" }
     }
 
-    // Two-Pane Split Layout matching 00:16 - 00:38 & 03:12 & 08:05 of the reference video
-    Row(
+    // Adaptive Two-Pane Split Layout supporting both Samsung Galaxy Z Fold 4 Folded Cover Screen (الوضع المطوي) and Unfolded Main Screen (الوضع المفتوح)
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(AppBackgroundDark)
@@ -251,93 +252,106 @@ fun MangaDetailsScreen(
             .windowInsetsPadding(WindowInsets.navigationBars)
             .testTag("manga_details_screen")
     ) {
-        // ==================== RIGHT PANE: MANGA INFO & SYNOPSIS ====================
-        Box(
-            modifier = Modifier
-                .weight(0.45f)
-                .fillMaxHeight()
+        val isFoldedCompact = maxWidth < 460.dp
+        val normalizedStatus = remember(liveWork.status) {
+            val lower = liveWork.status.trim().lowercase()
+            when {
+                lower.contains("ongoing") || lower.contains("on going") || lower.contains("مستمر") -> "مستمرة"
+                lower.contains("completed") || lower.contains("مكتمل") -> "مكتملة"
+                lower.contains("hiatus") || lower.contains("متوقف") -> "متوقفة"
+                liveWork.status.isBlank() -> "مستمرة"
+                else -> liveWork.status
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxSize()
         ) {
-            MangaCoverArtwork(
-                work = liveWork,
-                showArabicTitleBanner = false,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .blur(26.dp)
-            )
+            // ==================== RIGHT PANE: MANGA INFO & SYNOPSIS ====================
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color(0xCC0D1017),
-                                Color(0xB310141F),
-                                Color(0xD90B0E15)
+                    .weight(if (isFoldedCompact) 0.44f else 0.45f)
+                    .fillMaxHeight()
+            ) {
+                MangaCoverArtwork(
+                    work = liveWork,
+                    showArabicTitleBanner = false,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(26.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color(0xCC0D1017),
+                                    Color(0xB310141F),
+                                    Color(0xD90B0E15)
+                                )
                             )
                         )
-                    )
-            )
-
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            ) {
-                // Top Row: Back Arrow + Title
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = onBackClick,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("manga_details_back_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "رجوع",
-                            tint = TextPrimaryWhite
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = liveWork.title,
-                        color = TextPrimaryWhite,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
+                )
 
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(horizontal = if (isFoldedCompact) 6.dp else 10.dp, vertical = 6.dp)
                 ) {
-                    // Cover Image (Right) + Status & Type/Author Boxes (Left)
+                    // Top Row: Back Arrow + Title
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.Top
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        MangaCoverArtwork(
-                            work = liveWork,
+                        IconButton(
+                            onClick = onBackClick,
                             modifier = Modifier
-                                .width(88.dp)
-                                .height(126.dp)
-                                .border(1.dp, Color(0xFF343B4D), RoundedCornerShape(8.dp))
-                        )
-
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                .size(36.dp)
+                                .testTag("manga_details_back_button")
                         ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "رجوع",
+                                tint = TextPrimaryWhite
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = liveWork.title,
+                            color = TextPrimaryWhite,
+                            fontSize = if (isFoldedCompact) 13.sp else 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (isFoldedCompact) {
+                            // Folded Cover Screen (الوضع المطوي - Galaxy Z Fold 4):
+                            // Stack Cover centered at top + full-width Status & Type badges so text never wraps mid-word
+                            Box(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                MangaCoverArtwork(
+                                    work = liveWork,
+                                    modifier = Modifier
+                                        .width(96.dp)
+                                        .height(134.dp)
+                                        .border(1.dp, Color(0xFF343B4D), RoundedCornerShape(8.dp))
+                                )
+                            }
+
                             Surface(
                                 color = Color(0xD9171A22),
                                 shape = RoundedCornerShape(10.dp),
@@ -345,12 +359,14 @@ fun MangaDetailsScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = "الحالة: ${liveWork.status}",
+                                    text = "الحالة: $normalizedStatus",
                                     color = TextPrimaryWhite,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     textAlign = TextAlign.Center,
-                                    modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp)
                                 )
                             }
 
@@ -362,20 +378,80 @@ fun MangaDetailsScreen(
                             ) {
                                 Text(
                                     text = if (liveWork.author.isNotBlank() && liveWork.author != "غير معروف") {
-                                        "المؤلف:\n${liveWork.author}"
+                                        "المؤلف: ${liveWork.author}"
                                     } else {
-                                        "النوع:\n${liveWork.type}"
+                                        "النوع: ${liveWork.type.replace("\n", " ")}"
                                     },
                                     color = TextPrimaryWhite,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    lineHeight = 15.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     textAlign = TextAlign.Center,
-                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 6.dp)
                                 )
                             }
+                        } else {
+                            // Unfolded Main Screen (الوضع المفتوح - Galaxy Z Fold 4) & Standard Wide Display:
+                            // Cover Image (Right) + Status & Type/Author Boxes (Left)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                MangaCoverArtwork(
+                                    work = liveWork,
+                                    modifier = Modifier
+                                        .width(88.dp)
+                                        .height(126.dp)
+                                        .border(1.dp, Color(0xFF343B4D), RoundedCornerShape(8.dp))
+                                )
+
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        color = Color(0xD9171A22),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, Color(0xFF2E3342)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "الحالة: $normalizedStatus",
+                                            color = TextPrimaryWhite,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)
+                                        )
+                                    }
+
+                                    Surface(
+                                        color = Color(0xD9171A22),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, Color(0xFF2E3342)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = if (liveWork.author.isNotBlank() && liveWork.author != "غير معروف") {
+                                                "المؤلف:\n${liveWork.author}"
+                                            } else {
+                                                "النوع:\n${liveWork.type}"
+                                            },
+                                            color = TextPrimaryWhite,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            lineHeight = 15.sp,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
-                    }
 
                     // Rating ★ + Read 📖 + Web/Protection 🌐 Bar
                     Surface(
@@ -1128,7 +1204,7 @@ fun MangaDetailsScreen(
                 }
             }
 
-            // Bottom 5-Icon Bar matching 00:16 - 00:38 & 08:31 - 08:32
+            // Bottom 5-Icon Bar matching 00:16 - 00:38 & 08:31 - 08:32 (responsive across Z Fold 4 folded & unfolded screens)
             HorizontalDivider(color = AppDividerColor, thickness = 1.dp)
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                 Row(
@@ -1136,8 +1212,8 @@ fun MangaDetailsScreen(
                         .fillMaxWidth()
                         .height(50.dp)
                         .background(Color(0xFF12151E))
-                        .padding(horizontal = 6.dp),
-                    horizontalArrangement = Arrangement.Start,
+                        .padding(horizontal = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // 1. Heart Icon: أضف إلى المفضلة
@@ -1146,13 +1222,15 @@ fun MangaDetailsScreen(
                             triggerActionHint("أضف إلى المفضلة")
                             onToggleFavorite(liveWork)
                         },
-                        modifier = Modifier.testTag("details_favorite_button")
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("details_favorite_button")
                     ) {
                         Icon(
                             imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             contentDescription = "أضف إلى المفضلة",
                             tint = if (isFavorite) PeriwinklePrimary else TextPrimaryWhite,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(21.dp)
                         )
                     }
 
@@ -1162,13 +1240,15 @@ fun MangaDetailsScreen(
                             isChaptersReversed = !isChaptersReversed
                             triggerActionHint("عكس الفصول")
                         },
-                        modifier = Modifier.testTag("details_reverse_chapters_button")
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("details_reverse_chapters_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.SwapVert,
                             contentDescription = "عكس الفصول",
                             tint = if (isChaptersReversed) PeriwinklePrimary else TextPrimaryWhite,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(21.dp)
                         )
                     }
 
@@ -1178,13 +1258,15 @@ fun MangaDetailsScreen(
                             triggerActionHint("حفظ")
                             showDownloadMangaDialog = true
                         },
-                        modifier = Modifier.testTag("details_save_manga_button")
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("details_save_manga_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Save,
                             contentDescription = "حفظ وتنزيل المانجا",
                             tint = TextPrimaryWhite,
-                            modifier = Modifier.size(21.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
@@ -1194,19 +1276,24 @@ fun MangaDetailsScreen(
                             triggerActionHint("البحث عن هذا العمل في المواقع المضافة")
                             showSearchInSitesDialog = true
                         },
-                        modifier = Modifier.testTag("details_search_other_sites_button")
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("details_search_other_sites_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.FindReplace,
                             contentDescription = "البحث عن هذا العمل في المواقع المضافة",
                             tint = TextPrimaryWhite,
-                            modifier = Modifier.size(21.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
                     // 5. Three-dots Overflow Menu (00:30 & 08:31-08:32):
                     // تحديث الصفحة / تحديث الغلاف / انشاء اختصار / الإبلاغ / شارك / تصدير / إزالة / فتح في ...
-                    Box {
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
                         IconButton(
                             onClick = { showOverflowMenu = true },
                             modifier = Modifier.testTag("details_more_menu_button")
@@ -1215,7 +1302,7 @@ fun MangaDetailsScreen(
                                 imageVector = Icons.Default.MoreVert,
                                 contentDescription = "المزيد",
                                 tint = TextPrimaryWhite,
-                                modifier = Modifier.size(21.dp)
+                                modifier = Modifier.size(20.dp)
                             )
                         }
 
@@ -1395,6 +1482,7 @@ fun MangaDetailsScreen(
                 }
             }
         }
+    }
     }
 
     // Advanced Batch Download Dialog ("حفظ" button at 00:33 & 07:03 + Batch Download Options)

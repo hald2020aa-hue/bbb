@@ -228,24 +228,100 @@ fun SiteCatalogScreen(
         isLoadingSiteUpdates = false
     }
 
-    // Background WebView DOM extractor for JS-rendered or Cloudflare-cookie sites
+    // Background WebView DOM extractor for JS-rendered or Cloudflare-cookie sites (handles both CATALOG and UPDATES tabs)
     HiddenSiteWebViewBridge(
-        targetUrl = targetCatalogUrl,
-        jsExtractorScript = LiveMangaSiteScraper.JS_EXTRACT_CATALOG,
-        reloadTrigger = refreshTrigger,
+        targetUrl = if (activeSectionTab == "UPDATES") site.url else targetCatalogUrl,
+        jsExtractorScript = if (activeSectionTab == "UPDATES" && siteLatestUpdates.isEmpty()) {
+            LiveMangaSiteScraper.JS_EXTRACT_LATEST_UPDATES
+        } else {
+            LiveMangaSiteScraper.JS_EXTRACT_CATALOG
+        },
+        reloadTrigger = refreshTrigger + siteUpdatesRefreshTrigger + (if (activeSectionTab == "UPDATES") 100 else 0),
         onResultJson = { rawJson ->
+            if (activeSectionTab == "UPDATES" && siteLatestUpdates.isEmpty()) {
+                val domUpdates = LiveMangaSiteScraper.parseLatestUpdatesFromDomJson(rawJson, site)
+                if (domUpdates.updates.isNotEmpty()) {
+                    siteLatestUpdates = domUpdates.updates
+                    siteUpdatesError = null
+                    siteUpdatesShowingCachedOffline = false
+                    isLoadingSiteUpdates = false
+                    onCacheSiteUpdates(domUpdates.updates)
+                }
+            }
             val domResult = LiveMangaSiteScraper.parseCatalogFromDomJson(rawJson, site)
             if (domResult.works.isNotEmpty()) {
                 liveWorks = domResult.works
                 requiresCloudflare = false
                 errorMessage = null
                 isLoadingCatalog = false
+                if (siteLatestUpdates.isEmpty()) {
+                    val now = System.currentTimeMillis()
+                    val fallbackUpdates = domResult.works.mapIndexed { idx, w ->
+                        com.example.data.MangaLatestUpdateItem(
+                            updateKey = "${site.id}_${w.id}_latest_$idx",
+                            sourceId = site.id,
+                            sourceName = site.name,
+                            sourceUrl = site.url,
+                            siteIconKey = site.iconKey,
+                            workId = w.id,
+                            workTitle = w.title,
+                            mangaUrl = w.mangaUrl,
+                            coverImageUrl = w.effectiveCoverUrl,
+                            chapterId = "${w.id}_ch_1",
+                            chapterTitle = "أحدث فصل",
+                            chapterNumber = 1,
+                            chapterNumberValue = 1.0,
+                            chapterNumberLabel = "1",
+                            chapterUrl = w.mangaUrl,
+                            publishDateText = "حديثاً",
+                            publishedAtEpochMillis = now - idx * 60_000L,
+                            isDateAvailable = true,
+                            originalOrderIndex = idx,
+                            syncedAt = now
+                        )
+                    }
+                    siteLatestUpdates = fallbackUpdates
+                    siteUpdatesError = null
+                    isLoadingSiteUpdates = false
+                }
             } else if (domResult.requiresCloudflare && liveWorks.isEmpty()) {
                 requiresCloudflare = true
                 isLoadingCatalog = false
             }
         }
     )
+
+    // Ensure that if liveWorks loaded first and the user switches to آخر التحديثات while siteLatestUpdates is still empty, it immediately populates from liveWorks
+    LaunchedEffect(activeSectionTab, liveWorks, isLoadingSiteUpdates) {
+        if (activeSectionTab == "UPDATES" && !isLoadingSiteUpdates && siteLatestUpdates.isEmpty() && liveWorks.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            siteLatestUpdates = liveWorks.mapIndexed { idx, w ->
+                com.example.data.MangaLatestUpdateItem(
+                    updateKey = "${site.id}_${w.id}_latest_$idx",
+                    sourceId = site.id,
+                    sourceName = site.name,
+                    sourceUrl = site.url,
+                    siteIconKey = site.iconKey,
+                    workId = w.id,
+                    workTitle = w.title,
+                    mangaUrl = w.mangaUrl,
+                    coverImageUrl = w.effectiveCoverUrl,
+                    chapterId = "${w.id}_ch_1",
+                    chapterTitle = "أحدث فصل",
+                    chapterNumber = 1,
+                    chapterNumberValue = 1.0,
+                    chapterNumberLabel = "1",
+                    chapterUrl = w.mangaUrl,
+                    publishDateText = "حديثاً",
+                    publishedAtEpochMillis = now - idx * 60_000L,
+                    isDateAvailable = true,
+                    originalOrderIndex = idx,
+                    syncedAt = now
+                )
+            }
+            siteUpdatesError = null
+        }
+    }
 
     val displayedWorks = remember(liveWorks, searchQuery, sortMode, selectedStatusFilter) {
         val byLocalSearch = if (searchQuery.isBlank()) {

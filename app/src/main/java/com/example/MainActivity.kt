@@ -689,6 +689,8 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         searchHistoryCount = settings.searchHistoryCount,
                         settings = settings,
                         onUpdateBoolean = { k, v -> viewModel.setBooleanSetting(k, v) },
+                        onUpdateString = { k, v -> viewModel.setStringSetting(k, v) },
+                        onUpdateInt = { k, v -> viewModel.setIntSetting(k, v) },
                         onBackClick = { viewModel.navigateBack() },
                         onClearCache = { viewModel.clearAppCache() },
                         onClearSearchHistory = { viewModel.clearPreviousSearchHistory() },

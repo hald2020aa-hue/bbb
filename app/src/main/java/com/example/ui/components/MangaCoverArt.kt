@@ -93,22 +93,25 @@ object MangaCoilImageLoader {
 
     private fun buildImageLoader(appContext: Context): ImageLoader {
         val dispatcher = Dispatcher().apply {
-            maxRequests = 8
-            maxRequestsPerHost = 4
+            maxRequests = 24
+            maxRequestsPerHost = 10
         }
         val okHttp = LiveMangaSiteScraper.httpClient.newBuilder()
             .dispatcher(dispatcher)
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .addInterceptor { chain ->
                 val original = chain.request()
                 val reqUrl = original.url.toString()
                 val referer = original.header("Referer").orEmpty()
+                val cleanUa = LiveMangaSiteScraper.activeUserAgent
+                    .replace("; wv", "")
+                    .ifBlank { LiveMangaSiteScraper.DEFAULT_USER_AGENT }
                 val builder = original.newBuilder()
                 if (original.header("User-Agent").isNullOrBlank()) {
-                    builder.header("User-Agent", LiveMangaSiteScraper.activeUserAgent)
+                    builder.header("User-Agent", cleanUa)
                 }
                 if (original.header("Accept").isNullOrBlank()) {
                     builder.header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
@@ -122,7 +125,13 @@ object MangaCoilImageLoader {
                         builder.header("Cookie", cookies)
                     }
                 }
-                val response = chain.proceed(builder.build())
+                var response = chain.proceed(builder.build())
+                // If CDN rejects hotlink Referer with 403/400, retry immediately without Referer
+                if (!response.isSuccessful && (response.code == 403 || response.code == 400) && referer.isNotBlank()) {
+                    response.close()
+                    val retryReq = builder.removeHeader("Referer").build()
+                    response = chain.proceed(retryReq)
+                }
                 val contentType = response.header("Content-Type").orEmpty().lowercase()
                 if (!response.isSuccessful) {
                     DiagnosticLogger.logError(
@@ -147,7 +156,18 @@ object MangaCoilImageLoader {
 
         return ImageLoader.Builder(appContext)
             .okHttpClient(okHttp)
-            .crossfade(true)
+            .memoryCache {
+                coil.memory.MemoryCache.Builder(appContext)
+                    .maxSizePercent(0.25)
+                    .build()
+            }
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(java.io.File(appContext.cacheDir, "manga_pages_disk_cache"))
+                    .maxSizeBytes(150L * 1024L * 1024L)
+                    .build()
+            }
+            .crossfade(false)
             .respectCacheHeaders(false)
             .build()
     }
@@ -583,7 +603,8 @@ fun HiddenSiteWebViewBridge(
                     settings.allowContentAccess = false
                     settings.loadsImagesAutomatically = false
                     settings.blockNetworkImage = true
-                    LiveMangaSiteScraper.activeUserAgent = settings.userAgentString ?: LiveMangaSiteScraper.DEFAULT_USER_AGENT
+                    LiveMangaSiteScraper.activeUserAgent = (settings.userAgentString ?: LiveMangaSiteScraper.DEFAULT_USER_AGENT)
+                        .replace("; wv", "")
 
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
@@ -603,7 +624,7 @@ fun HiddenSiteWebViewBridge(
                                     }
                                 } catch (_: Exception) {
                                 }
-                            }, 950L)
+                            }, 450L)
                         }
                     }
                     webViewRef = this

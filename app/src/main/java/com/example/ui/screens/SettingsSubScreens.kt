@@ -76,12 +76,16 @@ fun StorageSettingsScreen(
     searchHistoryCount: Int,
     settings: UserSettings = UserSettings(),
     onUpdateBoolean: (String, Boolean) -> Unit = { _, _ -> },
+    onUpdateString: (String, String) -> Unit = { _, _ -> },
+    onUpdateInt: (String, Int) -> Unit = { _, _ -> },
     onBackClick: () -> Unit,
     onClearCache: () -> Unit,
     onClearSearchHistory: () -> Unit,
     onShowToast: (String) -> Unit
 ) {
     var showMoveStorageDialog by remember { mutableStateOf(false) }
+    var showPreferredFormatDialog by remember { mutableStateOf(false) }
+    var showMaxDownloadsDialog by remember { mutableStateOf(false) }
 
     // Exact screen from 01:20-01:22
     Column(
@@ -255,12 +259,171 @@ fun StorageSettingsScreen(
 
         HorizontalDivider(color = AppDividerColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 8.dp))
 
+        Text(
+            text = "خيارات تنزيل الفصول",
+            color = PeriwinklePrimary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+        )
+
+        // Preferred Download Format ("تنسيق التحميل المُفضل" matching Screenshot 3)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showPreferredFormatDialog = true }
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .testTag("preferred_download_format_row")
+        ) {
+            Text(
+                text = "تنسيق التحميل المُفضل",
+                color = TextPrimaryWhite,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = settings.preferredDownloadFormat,
+                color = TextSecondaryGrey,
+                fontSize = 14.sp
+            )
+        }
+
+        // Max Concurrent Downloads
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showMaxDownloadsDialog = true }
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .testTag("storage_max_downloads_row")
+        ) {
+            Text(
+                text = "الحد الأقصى للتنزيلات المتزامنة",
+                color = TextPrimaryWhite,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "${settings.maxConcurrentDownloads} فصول في نفس الوقت",
+                color = TextSecondaryGrey,
+                fontSize = 14.sp
+            )
+        }
+
+        // Wi-Fi Only Downloads
+        SettingsSwitchItem(
+            title = "التحميل فقط من خلال الواي فاي",
+            subtitle = "تأجيل تنزيل الفصول عند استخدام بيانات الهاتف لتوفير الباقة",
+            checked = settings.downloadWifiOnly,
+            onCheckedChange = { onUpdateBoolean("downloadWifiOnly", it) }
+        )
+
         // Auto-Delete Read Chapters
         SettingsSwitchItem(
             title = "الحذف التلقائي للفصول المقروءة",
             subtitle = "حذف فصل التنزيل تلقائياً بعد الانتهاء من قراءته (مع الاحتفاظ بآخر ${settings.keepLastReadChaptersCount} فصول لتوفير المساحة)",
             checked = settings.autoDeleteReadChapters,
             onCheckedChange = { onUpdateBoolean("autoDeleteReadChapters", it) }
+        )
+    }
+
+    if (showPreferredFormatDialog) {
+        val formats = listOf("تلقائي", "ملف CBZ واحد", "ملفات CBZ متعددة")
+        AlertDialog(
+            onDismissRequest = { showPreferredFormatDialog = false },
+            containerColor = AppDialogSurface,
+            title = {
+                Text(
+                    text = "تنسيق التحميل المُفضل",
+                    color = TextPrimaryWhite,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.End
+                )
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    formats.forEach { formatOption ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onUpdateString("preferredDownloadFormat", formatOption)
+                                    showPreferredFormatDialog = false
+                                    onShowToast("تنسيق التحميل المُفضل: $formatOption")
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = formatOption,
+                                color = TextPrimaryWhite,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.width(14.dp))
+                            RadioButton(
+                                selected = settings.preferredDownloadFormat == formatOption,
+                                onClick = {
+                                    onUpdateString("preferredDownloadFormat", formatOption)
+                                    showPreferredFormatDialog = false
+                                    onShowToast("تنسيق التحميل المُفضل: $formatOption")
+                                },
+                                colors = RadioButtonDefaults.colors(selectedColor = PeriwinklePrimary)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPreferredFormatDialog = false }) {
+                    Text("Cancel", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
+
+    if (showMaxDownloadsDialog) {
+        val limits = listOf(1, 2, 3, 4, 6, 8, 10)
+        AlertDialog(
+            onDismissRequest = { showMaxDownloadsDialog = false },
+            containerColor = AppDialogSurface,
+            title = { Text("الحد الأقصى للتنزيلات", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    limits.forEach { limit ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onUpdateInt("maxConcurrentDownloads", limit)
+                                    showMaxDownloadsDialog = false
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = settings.maxConcurrentDownloads == limit,
+                                onClick = {
+                                    onUpdateInt("maxConcurrentDownloads", limit)
+                                    showMaxDownloadsDialog = false
+                                },
+                                colors = RadioButtonDefaults.colors(selectedColor = PeriwinklePrimary)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("$limit تنزيلات متزامنة", color = TextPrimaryWhite)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showMaxDownloadsDialog = false }) {
+                    Text("إغلاق", color = PeriwinklePrimary)
+                }
+            }
         )
     }
 
@@ -836,6 +999,17 @@ fun MoreSettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable { activeModal = "preferredDownloadFormat" }
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .testTag("more_preferred_download_format_row")
+        ) {
+            Text("تنسيق التحميل المُفضل", color = TextPrimaryWhite, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text(settings.preferredDownloadFormat, color = TextSecondaryGrey, fontSize = 14.sp)
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
                 .clickable { activeModal = "maxDownloads" }
                 .padding(horizontal = 20.dp, vertical = 14.dp)
                 .testTag("max_downloads_row")
@@ -1142,6 +1316,63 @@ fun MoreSettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = PeriwinklePrimary, contentColor = PeriwinkleOnPrimary)
                     ) {
                         Text("حفظ الرمز", fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        }
+        "preferredDownloadFormat" -> {
+            val formats = listOf("تلقائي", "ملف CBZ واحد", "ملفات CBZ متعددة")
+            AlertDialog(
+                onDismissRequest = { activeModal = null },
+                containerColor = AppDialogSurface,
+                title = {
+                    Text(
+                        text = "تنسيق التحميل المُفضل",
+                        color = TextPrimaryWhite,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.End
+                    )
+                },
+                text = {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        formats.forEach { formatOption ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onUpdateString("preferredDownloadFormat", formatOption)
+                                        activeModal = null
+                                        onShowToast("تنسيق التحميل المُفضل: $formatOption")
+                                    }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                Text(
+                                    text = formatOption,
+                                    color = TextPrimaryWhite,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Spacer(modifier = Modifier.width(14.dp))
+                                RadioButton(
+                                    selected = settings.preferredDownloadFormat == formatOption,
+                                    onClick = {
+                                        onUpdateString("preferredDownloadFormat", formatOption)
+                                        activeModal = null
+                                        onShowToast("تنسيق التحميل المُفضل: $formatOption")
+                                    },
+                                    colors = RadioButtonDefaults.colors(selectedColor = PeriwinklePrimary)
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { activeModal = null }) {
+                        Text("Cancel", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
                     }
                 }
             )

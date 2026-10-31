@@ -897,7 +897,7 @@ class MangaDownloadManager(
         chapterTitle: String,
         pageNumber: Int
     ): ByteArray? {
-        for (attempt in 1..2) {
+        for (attempt in 1..3) {
             val bytes = downloadSingleImageBytes(
                 imageUrl = imageUrl,
                 refererUrl = refererUrl,
@@ -912,8 +912,8 @@ class MangaDownloadManager(
             if (bytes != null && storageManager.isValidImageBytes(bytes)) {
                 return bytes
             }
-            if (attempt == 1 && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
-                delay(350)
+            if (attempt < 3 && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
+                delay(250L * attempt)
             }
         }
         return null
@@ -957,21 +957,29 @@ class MangaDownloadManager(
         }
 
         return try {
-            val cleanUrl = imageUrl.trim()
-            val effectiveReferer = refererUrl.ifBlank { siteUrl }.trim()
+            val cleanUrl = imageUrl.trim().replace(" ", "%20")
+            val siteOriginReferer = siteUrl.trim().trimEnd('/') + "/"
+            val effectiveReferer = when (attempt) {
+                1 -> refererUrl.ifBlank { siteOriginReferer }.trim()
+                2 -> siteOriginReferer
+                else -> ""
+            }
+            val cleanUserAgent = LiveMangaSiteScraper.activeUserAgent
+                .replace("; wv", "")
+                .ifBlank { LiveMangaSiteScraper.DEFAULT_USER_AGENT }
             val builder = Request.Builder()
                 .url(cleanUrl)
-                .header("User-Agent", LiveMangaSiteScraper.activeUserAgent.ifBlank { LiveMangaSiteScraper.DEFAULT_USER_AGENT })
+                .header("User-Agent", cleanUserAgent)
                 .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
                 .header("Accept-Language", "ar,en-US;q=0.9,en;q=0.8")
 
-            if (effectiveReferer.isNotBlank()) {
+            if (effectiveReferer.isNotBlank() && effectiveReferer.startsWith("http")) {
                 builder.header("Referer", effectiveReferer)
             }
 
             val combinedCookies = LiveMangaSiteScraper.getCombinedCookies(
                 targetUrl = cleanUrl,
-                refererUrl = effectiveReferer,
+                refererUrl = refererUrl.ifBlank { siteUrl },
                 siteUrl = siteUrl
             )
             if (combinedCookies.isNotBlank()) {

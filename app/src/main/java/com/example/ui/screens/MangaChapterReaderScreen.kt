@@ -212,14 +212,14 @@ fun MangaChapterReaderScreen(
             } else {
                 lastScrapeError = res.errorMessage
                 loadingProgress = 97
-                delay(900)
+                delay(250)
                 isChapterLoaded = true
             }
         }
     }
 
-    // Hidden WebView DOM Bridge only when online and not reading a completed offline chapter
-    if ((!isOfflineComplete && targetChapterUrl.startsWith("http")) || refreshTrigger > 0) {
+    // Hidden WebView DOM Bridge only when pages were not already resolved by OkHttp/cache
+    if ((!isOfflineComplete && targetChapterUrl.startsWith("http") && livePageUrls.isEmpty() && localPagePaths.isEmpty()) || refreshTrigger > 0) {
         HiddenSiteWebViewBridge(
             targetUrl = targetChapterUrl,
             jsExtractorScript = LiveMangaSiteScraper.JS_EXTRACT_CHAPTER_PAGES,
@@ -295,9 +295,34 @@ fun MangaChapterReaderScreen(
         }
     }
 
+    val readerContext = androidx.compose.ui.platform.LocalContext.current
+
     LaunchedEffect(currentPageIndex, isChapterLoaded) {
         if (isChapterLoaded && effectivePageCount > 0) {
             onSaveReadingProgress(currentPageIndex)
+        }
+    }
+
+    // Active lookahead prefetcher: preloads current + next 5 pages in background so scrolling has zero lag
+    LaunchedEffect(currentPageIndex, livePageUrls) {
+        if (livePageUrls.isNotEmpty() && !isOfflineComplete) {
+            val loader = com.example.ui.components.MangaCoilImageLoader.get(readerContext)
+            val referer = targetChapterUrl.ifBlank { work.siteUrl }
+            val startIdx = currentPageIndex.coerceAtLeast(0)
+            val endIdx = (startIdx + 5).coerceAtMost(livePageUrls.lastIndex)
+            for (idx in startIdx..endIdx) {
+                val url = livePageUrls.getOrNull(idx) ?: continue
+                if (url.startsWith("http")) {
+                    val req = coil.request.ImageRequest.Builder(readerContext)
+                        .data(url)
+                        .setHeader("Referer", referer)
+                        .setHeader("User-Agent", LiveMangaSiteScraper.activeUserAgent.replace("; wv", ""))
+                        .memoryCacheKey(url)
+                        .diskCacheKey(url)
+                        .build()
+                    loader.enqueue(req)
+                }
+            }
         }
     }
 

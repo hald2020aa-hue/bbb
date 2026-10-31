@@ -171,6 +171,13 @@ object LiveMangaSiteScraper {
                                     try {
                                         CookieManager.getInstance().flush()
                                     } catch (_: Throwable) {}
+                                    // Trigger scroll events so lazy-load scripts populate data-src / src attributes immediately
+                                    try {
+                                        targetView.evaluateJavascript(
+                                            "(function(){ try { window.scrollTo(0, 1200); window.scrollTo(0, document.body.scrollHeight); window.scrollTo(0, 0); } catch(e){} })();",
+                                            null
+                                        )
+                                    } catch (_: Throwable) {}
                                     fun pollDom() {
                                         if (completed) return
                                         pollCount++
@@ -185,11 +192,11 @@ object LiveMangaSiteScraper {
                                             if (hasData || pollCount >= 4) {
                                                 finishWith(rawJson)
                                             } else {
-                                                targetView.postDelayed({ pollDom() }, 950L)
+                                                targetView.postDelayed({ pollDom() }, 450L)
                                             }
                                         }
                                     }
-                                    targetView.postDelayed({ pollDom() }, 650L)
+                                    targetView.postDelayed({ pollDom() }, 300L)
                                 }
                             }
                         }
@@ -862,13 +869,21 @@ object LiveMangaSiteScraper {
     fun parseMangaDetailsHtml(html: String, baseWork: MangaWork, pageUrl: String): MangaWork {
         if (html.isBlank()) return baseWork
 
-        // Title extraction
-        val h1Title = Regex("""<h1[^>]*>([\s\S]*?)</h1>""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.getOrNull(1)?.let { cleanMangaTitle(stripHtmlTags(it)) }
-            ?.takeIf { it.isNotBlank() }
+        // Title extraction — prefer specific manga title containers before generic <h1> so site header logos (like mangatek.com) don't overwrite the manga title
+        val specificH1 = Regex(
+            """<(?:div|header)[^>]+class=["'][^"']*(?:post-title|series-title|manga-title|entry-header)[^"']*["'][^>]*>[\s\S]{0,400}?<h1[^>]*>([\s\S]*?)</h1>""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.getOrNull(1)?.let { cleanMangaTitle(stripHtmlTags(it)) }
+            ?.takeIf { it.isNotBlank() && !isGenericSiteHeaderTitle(it, baseWork) }
+
+        val h1Title = specificH1 ?: Regex("""<h1[^>]*>([\s\S]*?)</h1>""", RegexOption.IGNORE_CASE)
+            .findAll(html)
+            .map { cleanMangaTitle(stripHtmlTags(it.groupValues.getOrNull(1) ?: "")) }
+            .firstOrNull { it.isNotBlank() && !isGenericSiteHeaderTitle(it, baseWork) }
+
         val ogTitle = extractMetaProperty(html, "og:title")
             .let { cleanMangaTitle(it) }
-            .takeIf { it.isNotBlank() }
+            .takeIf { it.isNotBlank() && !isGenericSiteHeaderTitle(it, baseWork) }
 
         // Cover extraction
         val summaryImgBlock = Regex(
@@ -934,7 +949,7 @@ object LiveMangaSiteScraper {
             title = h1Title ?: ogTitle ?: baseWork.title,
             coverImageUrl = coverUrl.ifBlank { baseWork.coverImageUrl },
             description = rawDesc.ifBlank { "لا يوجد وصف متاح لهذا العمل على الموقع." },
-            status = status,
+            status = normalizeStatusArabic(status),
             type = type,
             rating = ratingMatch,
             genres = if (genres.isNotEmpty()) genres.take(8) else baseWork.genres,
@@ -1458,11 +1473,11 @@ object LiveMangaSiteScraper {
                             }
                         }
 
-                        // Check for multi-part / paginated sub-pages of the same chapter
+                        // Check for multi-part / paginated sub-pages of the same chapter (capped at 6 to prevent slow sequential delays)
                         val subPageUrls = extractChapterSubPageUrls(html, targetUrl)
                         if (subPageUrls.isNotEmpty() && pages.size <= 3) {
                             val seenPages = LinkedHashSet(pages)
-                            for (subUrl in subPageUrls.take(25)) {
+                            for (subUrl in subPageUrls.take(6)) {
                                 try {
                                     httpClient.newCall(buildRequest(subUrl, referer = targetUrl)).execute().use { subResp ->
                                         val subHtml = subResp.body?.string() ?: ""
@@ -2547,7 +2562,7 @@ object LiveMangaSiteScraper {
             var title = document.title || "";
             var isCf = title.indexOf("Just a moment") !== -1 ||
                        !!document.querySelector("#cf-wrapper, .cf-browser-verification, iframe[src*='challenges.cloudflare.com']");
-            var h1 = document.querySelector("h1, .post-title h1, .entry-title");
+            var h1 = document.querySelector(".post-title h1, h1.entry-title, .series-title h1, .manga-title h1, .post-title h2, main h1, article h1") || document.querySelector("h1");
             var workTitle = h1 ? h1.innerText.trim() : title;
             var coverEl = document.querySelector(".summary_image img, .thumb img, .white-bg img, .series-thumb img, .poster img, meta[property='og:image']");
             var cover = "";
@@ -2818,7 +2833,12 @@ object LiveMangaSiteScraper {
         return try {
             val obj = JSONObject(unwrapped)
             val isCf = obj.optBoolean("cf", false)
-            val title = cleanMangaTitle(obj.optString("title")).ifBlank { baseWork.title }
+            val rawCandidateTitle = cleanMangaTitle(obj.optString("title"))
+            val title = if (rawCandidateTitle.isNotBlank() && !isGenericSiteHeaderTitle(rawCandidateTitle, baseWork)) {
+                rawCandidateTitle
+            } else {
+                baseWork.title
+            }
             val cover = resolveUrl(baseWork.siteUrl, obj.optString("cover")).ifBlank { baseWork.coverImageUrl ?: "" }
             val desc = obj.optString("desc").trim().ifBlank { baseWork.description }
 
@@ -2874,6 +2894,7 @@ object LiveMangaSiteScraper {
             val sortedChapters = deduplicateAndSortChapters(chList, baseWork.id)
             val updated = baseWork.copy(
                 title = title,
+                status = normalizeStatusArabic(baseWork.status),
                 coverImageUrl = cover.ifBlank { baseWork.coverImageUrl },
                 description = desc.ifBlank { "لا يوجد وصف متاح لهذا العمل." },
                 genres = if (genres.isNotEmpty()) genres else baseWork.genres,
@@ -3045,10 +3066,49 @@ object LiveMangaSiteScraper {
             .removePrefix("مانهوا ")
             .substringBefore(" - مانجا ليك")
             .substringBefore(" - مانجاتك")
+            .substringBefore(" | مانجاتك")
+            .substringBefore(" - موقع المانجا")
             .substringBefore(" - أزورا")
             .substringBefore(" | Team-X")
             .substringBefore(" - Team-X")
             .trim()
+    }
+
+    private fun isGenericSiteHeaderTitle(candidate: String, baseWork: MangaWork): Boolean {
+        val lower = candidate.trim().lowercase(Locale.ROOT)
+        if (lower.isBlank()) return true
+        // Reject domain-like titles such as "mangatek.com", "lekmanga.net", etc.
+        if (Regex("""^[a-z0-9.-]+\.(?:com|net|org|io|me|co|site|online|top|cc|tv)$""").matches(lower)) {
+            return true
+        }
+        val genericSiteNames = listOf(
+            "mangatek", "mangatek.com", "مانجاتك", "موقع المانجا العربي الأول",
+            "مانجا ليك", "lekmanga", "أزورا", "azora", "team-x", "تيم إكس",
+            "الرئيسية", "قائمة المانجا", "جميع الأعمال"
+        )
+        if (genericSiteNames.any { lower == it || lower == "$it.com" || lower == "$it.net" }) {
+            return true
+        }
+        val siteHost = try {
+            URI(baseWork.siteUrl).host?.lowercase(Locale.ROOT)?.removePrefix("www.").orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+        if (siteHost.isNotBlank() && (lower == siteHost || lower == siteHost.substringBefore("."))) {
+            return true
+        }
+        return false
+    }
+
+    private fun normalizeStatusArabic(rawStatus: String): String {
+        val lower = rawStatus.trim().lowercase(Locale.ROOT)
+        return when {
+            lower.contains("ongoing") || lower.contains("on going") || lower.contains("مستمر") -> "مستمرة"
+            lower.contains("completed") || lower.contains("مكتمل") -> "مكتملة"
+            lower.contains("hiatus") || lower.contains("متوقف") -> "متوقفة"
+            rawStatus.isBlank() -> "مستمرة"
+            else -> rawStatus
+        }
     }
 
     private fun isLikelyMangaWorkUrl(url: String, siteUrl: String): Boolean {
@@ -3121,27 +3181,10 @@ object LiveMangaSiteScraper {
     private fun isLikelyChapterPageImage(imgUrl: String): Boolean {
         val lower = imgUrl.lowercase(Locale.ROOT)
         if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
-        val nonImageExtensions = listOf(".js", ".css", ".html", ".htm", ".php", ".json", ".xml", ".woff", ".ttf", ".mp4", ".mp3")
+        val nonImageExtensions = listOf(".js", ".css", ".html", ".htm", ".php", ".json", ".xml", ".woff", ".woff2", ".ttf", ".mp4", ".mp3", ".svg", ".ico")
         val pathOnly = lower.substringBefore("?")
         if (nonImageExtensions.any { pathOnly.endsWith(it) }) return false
-        return lower.contains(".jpg") ||
-            lower.contains(".jpeg") ||
-            lower.contains(".png") ||
-            lower.contains(".webp") ||
-            lower.contains(".avif") ||
-            lower.contains(".gif") ||
-            lower.contains("wp-content/uploads") ||
-            lower.contains("/uploads/") ||
-            lower.contains("/storage/") ||
-            lower.contains("/images/") ||
-            lower.contains("/files/") ||
-            lower.contains("/data/") ||
-            lower.contains("chapter") ||
-            lower.contains("manga") ||
-            lower.contains("cdn") ||
-            lower.contains("imagedelivery") ||
-            lower.contains("r2.dev") ||
-            lower.contains("cloudflare")
+        return true
     }
 
     private fun slugFromUrl(url: String): String {
