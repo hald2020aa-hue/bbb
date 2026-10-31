@@ -543,8 +543,8 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
                 scrollOffset = scrollOffset
             )
 
-            // 1. Smart Next-Chapter Preloading when reaching the last 20% of the current chapter
-            if (settings.value.preloadNextChapter && totalPages > 1 && safePage >= (totalPages * 0.8f).toInt()) {
+            // 1. Smart Next-3-Chapters Preloading & Auto-Download when reaching 70%+ of the current chapter
+            if (settings.value.preloadNextChapter && totalPages > 1 && safePage >= (totalPages * 0.7f).toInt()) {
                 val sortedChapters = work.chapters.sortedBy { it.number }
                 val nextChapter = sortedChapters.firstOrNull { it.number > chapter.number }
                 if (nextChapter != null && nextChapter.chapterUrl.startsWith("http")) {
@@ -564,6 +564,15 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
                                         LiveMangaSiteScraper.httpClient.newCall(req).execute().close()
                                     }
                                 }
+                            }
+                            // Auto-download next up to 3 chapters in background if not already downloaded
+                            val downloadedNums = downloadedChaptersMap.value[work.id] ?: emptySet()
+                            val nextThreeUnhandled = sortedChapters
+                                .filter { it.number > chapter.number && it.number !in downloadedNums && it.chapterUrl.startsWith("http") }
+                                .take(3)
+                                .filter { preloadedChapterUrls.add("autodl_${work.id}_${it.number}") }
+                            if (nextThreeUnhandled.isNotEmpty()) {
+                                repository.mangaDownloadManager.enqueueChaptersDownload(work, nextThreeUnhandled)
                             }
                         }
                     }
@@ -589,6 +598,34 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
                         refreshStorageStats()
                     }
                 }
+            }
+        }
+    }
+
+    fun cleanReadChaptersNow() {
+        viewModelScope.launch {
+            var deletedCount = 0
+            val keepCount = settings.value.keepLastReadChaptersCount.coerceAtLeast(0)
+            val allProgress = readingProgressList.value
+            val latestChapterByWork = allProgress
+                .groupBy { it.workId }
+                .mapValues { (_, list) -> list.maxOfOrNull { it.chapterNumber } ?: 0 }
+
+            for ((workId, maxReadCh) in latestChapterByWork) {
+                val downloadedForWork = repository.dao.getDownloadedChaptersForWorkOnce(workId)
+                val toDelete = downloadedForWork.filter { ch ->
+                    ch.chapterNumber <= (maxReadCh - keepCount)
+                }
+                toDelete.forEach { oldCh ->
+                    repository.deleteDownloadedChapter(workId, oldCh.chapterNumber)
+                    deletedCount++
+                }
+            }
+            refreshStorageStats()
+            if (deletedCount > 0) {
+                showToast("تم تنظيف $deletedCount فصل مقروء وتوفير المساحة بنجاح")
+            } else {
+                showToast("لا توجد فصول مقروءة قديمة قابلة للحذف حالياً")
             }
         }
     }

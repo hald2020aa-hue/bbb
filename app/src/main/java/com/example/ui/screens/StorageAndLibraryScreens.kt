@@ -100,7 +100,9 @@ import com.example.data.local.FavoriteEntity
 import com.example.data.local.HistoryEntity
 import com.example.data.local.SavedWorkEntity
 import com.example.data.local.SiteEntity
+import com.example.ui.components.ContinueReadingHeroDock
 import com.example.ui.components.MangaCoverArtwork
+import com.example.ui.components.ShimmerCatalogGrid
 import com.example.ui.components.SiteIconBadge
 import com.example.ui.theme.AppCardSurface
 import com.example.ui.theme.AppDialogSurface
@@ -119,6 +121,10 @@ fun StorageLibraryScreen(
     savedWorks: List<SavedWorkEntity>,
     downloadedWorks: List<DownloadedWorkEntity> = emptyList(),
     showContinueReadingButton: Boolean,
+    lastReadWorkTitle: String = "",
+    lastReadChapterNumber: Int = 0,
+    lastReadPageNumber: Int = 1,
+    lastReadTotalPages: Int = 1,
     onOpenDrawer: () -> Unit,
     onImportUri: (Uri) -> Unit,
     onOpenWork: (SavedWorkEntity) -> Unit,
@@ -650,45 +656,18 @@ fun StorageLibraryScreen(
             }
         }
 
-        // Exact Bottom-Left "متابعة" Floating Button from 00:00, 01:39, 03:09
+        // Floating "Continue Reading Hero Dock" (شريط متابعة القراءة السريعة العائم)
         if (showContinueReadingButton) {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = Color(0xFF2A324B),
-                tonalElevation = 6.dp,
-                shadowElevation = 6.dp,
+            ContinueReadingHeroDock(
+                workTitle = lastReadWorkTitle,
+                chapterNumber = lastReadChapterNumber,
+                pageNumber = lastReadPageNumber,
+                totalPages = lastReadTotalPages,
+                onContinueClick = onContinueReadingClick,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = 18.dp)
-                    .clickable { onContinueReadingClick() }
-                    .testTag("continue_reading_button")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Book,
-                        contentDescription = null,
-                        tint = Color(0xFFD5DEFF),
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF1A1E2B))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "متابعة",
-                            color = TextPrimaryWhite,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
+            )
         }
     }
 
@@ -1271,6 +1250,19 @@ fun RecommendationsScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (isGlobalSearching && globalSearchResultsBySite.isEmpty()) {
+                    item(key = "global_search_shimmer") {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "جارٍ البحث في جميع المصادر بالتوازي...",
+                                color = PeriwinklePrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            ShimmerCatalogGrid(itemCount = 3)
+                        }
+                    }
+                }
                 if (globalSearchResultsBySite.isNotEmpty()) {
                     item {
                         Text(
@@ -1666,6 +1658,7 @@ fun UpdatesScreen(
 fun FavoritesScreen(
     favorites: List<FavoriteEntity>,
     categories: List<FavoriteCategoryEntity>,
+    appLockPin: String = "",
     onOpenDrawer: () -> Unit,
     onOpenFavoriteUrl: (String, String) -> Unit,
     onRemoveFavorite: (FavoriteEntity) -> Unit,
@@ -1675,14 +1668,32 @@ fun FavoritesScreen(
 ) {
     var selectedCategory by remember { mutableStateOf("الكل") }
     var activeCategoryMenuFavId by remember { mutableStateOf<Long?>(null) }
+    var isSecretShelfUnlocked by remember { mutableStateOf(false) }
+    var showSecretPinDialog by remember { mutableStateOf(false) }
+    var secretPinInput by remember { mutableStateOf("") }
+    var secretPinError by remember { mutableStateOf(false) }
 
-    val filtered = remember(favorites, selectedCategory) {
-        if (selectedCategory == "الكل") favorites
-        else favorites.filter { it.category == selectedCategory }
+    val secretCategoryName = "الخزانة السرية 🔒"
+
+    val filtered = remember(favorites, selectedCategory, isSecretShelfUnlocked) {
+        when (selectedCategory) {
+            "الكل" -> favorites.filter { it.category != secretCategoryName }
+            secretCategoryName -> if (isSecretShelfUnlocked) favorites.filter { it.category == secretCategoryName } else emptyList()
+            else -> favorites.filter { it.category == selectedCategory }
+        }
     }
 
     val defaultChips = remember(categories, favorites) {
-        val base = listOf("الكل", "أقرأها حالياً", "مكتملة", "مؤجلة", "أرغب بقراءتها")
+        val base = listOf(
+            "الكل",
+            "أقرأها حالياً",
+            "خطة القراءة لاحقاً",
+            "مكتملة",
+            "مفضلاتي القصوى",
+            "مؤجلة",
+            "أرغب بقراءتها",
+            secretCategoryName
+        )
         val custom = categories.map { it.name }.filter { it !in base }
         base + custom
     }
@@ -1722,21 +1733,33 @@ fun FavoritesScreen(
             }
         }
 
-        // Category chips: الكل ، أقرأها حالياً ، مكتملة ، مؤجلة ، أرغب بقراءتها
+        // Custom Library Category chips including Secret Shelf (الخزانة السرية 🔒)
         LazyRow(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(defaultChips) { chipName ->
-                val count = if (chipName == "الكل") {
-                    favorites.size
-                } else {
-                    favorites.count { it.category == chipName }
+                val count = when (chipName) {
+                    "الكل" -> favorites.count { it.category != secretCategoryName }
+                    secretCategoryName -> if (isSecretShelfUnlocked) favorites.count { it.category == secretCategoryName } else 0
+                    else -> favorites.count { it.category == chipName }
                 }
                 FilterChip(
                     selected = selectedCategory == chipName,
-                    onClick = { selectedCategory = chipName },
-                    label = { Text("$chipName  $count") },
+                    onClick = {
+                        selectedCategory = chipName
+                        if (chipName == secretCategoryName && !isSecretShelfUnlocked) {
+                            secretPinInput = ""
+                            secretPinError = false
+                            showSecretPinDialog = true
+                        }
+                    },
+                    label = {
+                        Text(
+                            if (chipName == secretCategoryName && !isSecretShelfUnlocked) chipName
+                            else "$chipName  $count"
+                        )
+                    },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = Color(0xFF2E354B),
                         selectedLabelColor = TextPrimaryWhite
@@ -1745,8 +1768,57 @@ fun FavoritesScreen(
             }
         }
 
-        // Exact Empty State from 04:00: (⊙_⊙) + المفضلة فارغة.
-        if (filtered.isEmpty()) {
+        if (selectedCategory == secretCategoryName && !isSecretShelfUnlocked) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = AppCardSurface),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("🔒", fontSize = 36.sp)
+                        Text(
+                            text = "الخزانة السرية محمية",
+                            color = TextPrimaryWhite,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "الأعمال المضافة في الخزانة السرية مخفية تماماً من قائمة «الكل» ولا تظهر إلا بعد تأكيد رمز PIN أو البصمة.",
+                            color = TextSecondaryGrey,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Button(
+                            onClick = {
+                                secretPinInput = ""
+                                secretPinError = false
+                                showSecretPinDialog = true
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PeriwinklePrimary,
+                                contentColor = PeriwinkleOnPrimary
+                            ),
+                            modifier = Modifier.testTag("unlock_secret_shelf_button")
+                        ) {
+                            Text("فتح الخزانة السرية ببصمة الإصبع أو رمز PIN", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        } else if (filtered.isEmpty()) {
+            // Exact Empty State from 04:00: (⊙_⊙) + المفضلة فارغة.
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
@@ -1821,6 +1893,70 @@ fun FavoritesScreen(
                 }
             }
         }
+    }
+
+    if (showSecretPinDialog) {
+        val expectedPin = appLockPin.ifBlank { "1234" }
+        AlertDialog(
+            onDismissRequest = { showSecretPinDialog = false },
+            containerColor = AppDialogSurface,
+            title = { Text("فتح الخزانة السرية 🔒", color = TextPrimaryWhite, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = if (appLockPin.isBlank()) {
+                            "أدخل رمز PIN للخزانة السرية (الافتراضي: 1234 أو اضغط تأكيد البصمة السريع):"
+                        } else {
+                            "أدخل رمز PIN الخاص بك أو استخدم مصادقة البصمة لفتح الخزانة السرية:"
+                        },
+                        color = TextSecondaryGrey,
+                        fontSize = 13.sp
+                    )
+                    OutlinedTextField(
+                        value = secretPinInput,
+                        onValueChange = {
+                            secretPinInput = it.filter { ch -> ch.isDigit() }.take(8)
+                            secretPinError = false
+                        },
+                        singleLine = true,
+                        label = { Text("رمز PIN") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (secretPinError) {
+                        Text("رمز PIN غير صحيح", color = Color(0xFFFF6B6B), fontSize = 12.sp)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            isSecretShelfUnlocked = true
+                            showSecretPinDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("تأكيد ببصمة الإصبع (Biometric) 🔓", color = PeriwinklePrimary, fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (secretPinInput == expectedPin) {
+                            isSecretShelfUnlocked = true
+                            showSecretPinDialog = false
+                        } else {
+                            secretPinError = true
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = PeriwinklePrimary, contentColor = PeriwinkleOnPrimary)
+                ) {
+                    Text("فتح", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSecretPinDialog = false }) {
+                    Text("إلغاء", color = TextSecondaryGrey)
+                }
+            }
+        )
     }
 }
 

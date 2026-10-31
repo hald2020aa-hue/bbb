@@ -8,7 +8,9 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
@@ -46,10 +49,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -631,24 +637,383 @@ fun ChapterPageIllustration(
                         null
                     }
                 }
+                val cropModifier = if (autoCropBorders) {
+                    Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer(
+                            scaleX = 1.07f,
+                            scaleY = 1.03f,
+                            clip = true
+                        )
+                } else {
+                    Modifier.fillMaxWidth()
+                }
                 if (slices != null && slices.size > 1) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         slices.forEachIndexed { sliceIdx, sliceBmp ->
                             androidx.compose.foundation.Image(
                                 bitmap = remember(sliceBmp) { sliceBmp.asImageBitmap() },
                                 contentDescription = "صفحة ${pageIndex + 1} - جزء ${sliceIdx + 1}",
-                                contentScale = ContentScale.FillWidth,
+                                contentScale = if (autoCropBorders) ContentScale.Crop else ContentScale.FillWidth,
                                 colorFilter = activeColorFilter,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = cropModifier
                             )
                         }
                     }
                 } else {
-                    SubcomposeAsyncImageContent(colorFilter = activeColorFilter)
+                    SubcomposeAsyncImageContent(
+                        modifier = cropModifier,
+                        contentScale = if (autoCropBorders) ContentScale.Crop else ContentScale.FillWidth,
+                        colorFilter = activeColorFilter
+                    )
                 }
             }
         }
     )
+}
+
+/**
+ * Dynamic Cover Palette extracted/derived for each Manga/Manhwa work to give every title
+ * a distinct, luxury visual atmosphere in MangaDetailsScreen.
+ */
+data class DynamicCoverPalette(
+    val dominantBackdropTop: Color,
+    val dominantBackdropMid: Color,
+    val dominantBackdropBottom: Color,
+    val accentPrimary: Color,
+    val accentOnPrimary: Color,
+    val badgeBorder: Color,
+    val badgeSurface: Color
+)
+
+@Composable
+fun rememberDynamicCoverPalette(work: MangaWork): DynamicCoverPalette {
+    val palettes = remember {
+        listOf(
+            // Royal Indigo & Periwinkle
+            DynamicCoverPalette(
+                dominantBackdropTop = Color(0xD9121933),
+                dominantBackdropMid = Color(0xCC0E1324),
+                dominantBackdropBottom = Color(0xF2090C14),
+                accentPrimary = Color(0xFFA0AEFF),
+                accentOnPrimary = Color(0xFF101735),
+                badgeBorder = Color(0xFF3E4B75),
+                badgeSurface = Color(0xD9151B2B)
+            ),
+            // Emerald Jade & Cyber Teal
+            DynamicCoverPalette(
+                dominantBackdropTop = Color(0xD90E2926),
+                dominantBackdropMid = Color(0xCC0B1D1C),
+                dominantBackdropBottom = Color(0xF2081112),
+                accentPrimary = Color(0xFF64FFDA),
+                accentOnPrimary = Color(0xFF062922),
+                badgeBorder = Color(0xFF2B5B54),
+                badgeSurface = Color(0xD9112221)
+            ),
+            // Crimson Ember & Gold
+            DynamicCoverPalette(
+                dominantBackdropTop = Color(0xD92E141C),
+                dominantBackdropMid = Color(0xCC1F1016),
+                dominantBackdropBottom = Color(0xF20D090C),
+                accentPrimary = Color(0xFFFF8A80),
+                accentOnPrimary = Color(0xFF310B09),
+                badgeBorder = Color(0xFF63323D),
+                badgeSurface = Color(0xD9221318)
+            ),
+            // Mystic Violet & Orchid
+            DynamicCoverPalette(
+                dominantBackdropTop = Color(0xD9241536),
+                dominantBackdropMid = Color(0xCC181026),
+                dominantBackdropBottom = Color(0xF20B0812),
+                accentPrimary = Color(0xFFCE93D8),
+                accentOnPrimary = Color(0xFF2A0E33),
+                badgeBorder = Color(0xFF533769),
+                badgeSurface = Color(0xD91C1326)
+            ),
+            // Imperial Gold & Bronze
+            DynamicCoverPalette(
+                dominantBackdropTop = Color(0xD92B2111),
+                dominantBackdropMid = Color(0xCC1E170D),
+                dominantBackdropBottom = Color(0xF20C0A07),
+                accentPrimary = Color(0xFFFFD54F),
+                accentOnPrimary = Color(0xFF2B2000),
+                badgeBorder = Color(0xFF634F2B),
+                badgeSurface = Color(0xD9211B11)
+            ),
+            // Ocean Azure & Cyan
+            DynamicCoverPalette(
+                dominantBackdropTop = Color(0xD90E2238),
+                dominantBackdropMid = Color(0xCC0B1726),
+                dominantBackdropBottom = Color(0xF2080D14),
+                accentPrimary = Color(0xFF80D8FF),
+                accentOnPrimary = Color(0xFF052436),
+                badgeBorder = Color(0xFF2D5073),
+                badgeSurface = Color(0xD9121E2B)
+            )
+        )
+    }
+    val keyString = "${work.id}_${work.title}_${work.coverImageUrl}_${work.genres.joinToString()}"
+    val index = (keyString.hashCode() and Int.MAX_VALUE) % palettes.size
+    return palettes[index]
+}
+
+/**
+ * Smooth Animated Shimmer Brush for skeleton loading cards.
+ */
+@Composable
+fun rememberShimmerBrush(): Brush {
+    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "shimmer_transition")
+    val translateAnim by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1000f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            animation = androidx.compose.animation.core.tween(
+                durationMillis = 1150,
+                easing = androidx.compose.animation.core.LinearEasing
+            ),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Restart
+        ),
+        label = "shimmer_offset"
+    )
+    return Brush.linearGradient(
+        colors = listOf(
+            Color(0xFF171A24),
+            Color(0xFF272C3D),
+            Color(0xFF171A24)
+        ),
+        start = Offset(translateAnim - 280f, translateAnim - 280f),
+        end = Offset(translateAnim, translateAnim)
+    )
+}
+
+@Composable
+fun ShimmerCatalogGrid(
+    itemCount: Int = 6,
+    modifier: Modifier = Modifier
+) {
+    val shimmerBrush = rememberShimmerBrush()
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .testTag("shimmer_catalog_grid"),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        val rows = (itemCount + 2) / 3
+        for (rowIdx in 0 until rows) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                for (colIdx in 0 until 3) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(148.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(shimmerBrush)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.82f)
+                                .height(12.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(shimmerBrush)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.55f)
+                                .height(10.dp)
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(shimmerBrush)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ShimmerUpdatesList(
+    itemCount: Int = 4,
+    modifier: Modifier = Modifier
+) {
+    val shimmerBrush = rememberShimmerBrush()
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .testTag("shimmer_updates_list"),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        repeat(itemCount) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF141720))
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(62.dp)
+                        .height(84.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(shimmerBrush)
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.75f)
+                            .height(14.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(shimmerBrush)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.48f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(shimmerBrush)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(96.dp)
+                            .height(26.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(shimmerBrush)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Floating "Continue Reading Hero Dock" (شريط متابعة القراءة السريعة العائم)
+ * Shows the last read work, chapter number, percentage progress bar, and a 1-tap "أكمل من الصفحة X" button.
+ */
+@Composable
+fun ContinueReadingHeroDock(
+    workTitle: String,
+    chapterNumber: Int,
+    pageNumber: Int,
+    totalPages: Int,
+    onContinueClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val hasActiveProgress = workTitle.isNotBlank() && chapterNumber > 0
+    val safePage = pageNumber.coerceAtLeast(1)
+    val safeTotal = totalPages.coerceAtLeast(safePage).coerceAtLeast(1)
+    val progressFraction = if (hasActiveProgress) {
+        (safePage.toFloat() / safeTotal.toFloat()).coerceIn(0.08f, 1f)
+    } else {
+        0f
+    }
+    val progressPercent = (progressFraction * 100f).toInt()
+
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = Color(0xF21D2336),
+        border = androidx.compose.foundation.BorderStroke(1.dp, PeriwinklePrimary.copy(alpha = 0.45f)),
+        tonalElevation = 8.dp,
+        shadowElevation = 8.dp,
+        modifier = modifier
+            .clickable { onContinueClick() }
+            .testTag("continue_reading_button")
+    ) {
+        if (hasActiveProgress) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoStories,
+                    contentDescription = null,
+                    tint = PeriwinklePrimary,
+                    modifier = Modifier.size(22.dp)
+                )
+                Column(modifier = Modifier.width(155.dp)) {
+                    Text(
+                        text = workTitle,
+                        color = TextPrimaryWhite,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "الفصل $chapterNumber • $progressPercent%",
+                        color = TextSecondaryGrey,
+                        fontSize = 10.sp,
+                        maxLines = 1
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { progressFraction },
+                        color = PeriwinklePrimary,
+                        trackColor = Color(0xFF32394F),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(PeriwinklePrimary)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "أكمل ص $safePage",
+                        color = PeriwinkleOnPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoStories,
+                    contentDescription = null,
+                    tint = Color(0xFFD5DEFF),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF1A1E2B))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "متابعة",
+                        color = TextPrimaryWhite,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
 }
 
 /**

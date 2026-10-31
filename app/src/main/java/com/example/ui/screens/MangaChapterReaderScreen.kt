@@ -29,7 +29,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -140,6 +142,7 @@ fun MangaChapterReaderScreen(
     onExportChapterPdf: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
     onExportChapterCbz: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
     onUpdateWebtoonMode: (Boolean) -> Unit,
+    onUpdateAutoCropBorders: (Boolean) -> Unit = {},
     onUpdateColorFilter: (String) -> Unit = {},
     onUpdateAutoScroll: (Boolean) -> Unit = {},
     onUpdateAutoScrollSpeed: (Float) -> Unit = {},
@@ -268,6 +271,8 @@ fun MangaChapterReaderScreen(
     var zoomOffsetX by remember { mutableFloatStateOf(0f) }
     var zoomOffsetY by remember { mutableFloatStateOf(0f) }
     var isWebtoonMode by remember(settings.webtoonAlwaysOn) { mutableStateOf(settings.webtoonAlwaysOn) }
+    var isDualPageSpread by remember { mutableStateOf(false) }
+    var localAutoCrop by remember(settings.autoCropBorders) { mutableStateOf(settings.autoCropBorders) }
     var localColorFilter by remember(settings.readerColorFilter) { mutableStateOf(settings.readerColorFilter) }
     var localAutoScroll by remember(settings.autoScroll) { mutableStateOf(settings.autoScroll) }
     var localAutoScrollSpeed by remember(settings.autoScrollSpeed) {
@@ -477,14 +482,24 @@ fun MangaChapterReaderScreen(
                             }
                         }
                     },
-                    onDoubleTap = {
+                    onDoubleTap = { tapOffset ->
                         if (settings.webtoonZoom) {
-                            if (zoomScale > 1.08f) {
-                                zoomScale = 1f
+                            val nextScale = when {
+                                zoomScale < 1.8f -> 2.25f
+                                zoomScale < 2.7f -> 3.0f
+                                else -> 1f
+                            }
+                            zoomScale = nextScale
+                            if (nextScale > 1.05f) {
+                                val centerX = size.width / 2f
+                                val centerY = size.height / 2f
+                                val maxPanX = (size.width * (nextScale - 1f)) / 2f
+                                val maxPanY = (size.height * (nextScale - 1f)) / 2f
+                                zoomOffsetX = ((centerX - tapOffset.x) * (nextScale - 1f)).coerceIn(-maxPanX, maxPanX)
+                                zoomOffsetY = ((centerY - tapOffset.y) * (nextScale - 1f)).coerceIn(-maxPanY, maxPanY)
+                            } else {
                                 zoomOffsetX = 0f
                                 zoomOffsetY = 0f
-                            } else {
-                                zoomScale = 2.25f
                             }
                         }
                     }
@@ -656,7 +671,7 @@ fun MangaChapterReaderScreen(
                             pageImageUrl = livePageUrls.getOrNull(pageIdx),
                             localFilePath = localPagePaths.getOrNull(pageIdx),
                             refererUrl = targetChapterUrl,
-                            autoCropBorders = settings.autoCropBorders,
+                            autoCropBorders = localAutoCrop,
                             colorFilterMode = localColorFilter,
                             splitLongStrip = settings.splitLongStripPages
                         )
@@ -710,7 +725,7 @@ fun MangaChapterReaderScreen(
                     }
                 }
             } else {
-                // Horizontal Paged Mode when "وضع الويبتون" is unchecked
+                // Horizontal Paged Mode (or Dual-Page Book Spread for Galaxy Z Fold 4 Unfolded Display)
                 HorizontalPager(
                     state = pagerState,
                     userScrollEnabled = zoomScale <= 1.05f,
@@ -724,20 +739,67 @@ fun MangaChapterReaderScreen(
                         )
                         .testTag("reader_horizontal_pager")
                 ) { pageIdx ->
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        item {
-                            ChapterPageIllustration(
-                                work = work,
-                                chapterNumber = chapter.number,
-                                pageIndex = pageIdx,
-                                totalPages = effectivePageCount,
-                                pageImageUrl = livePageUrls.getOrNull(pageIdx),
-                                localFilePath = localPagePaths.getOrNull(pageIdx),
-                                refererUrl = targetChapterUrl,
-                                autoCropBorders = settings.autoCropBorders,
-                                colorFilterMode = localColorFilter,
-                                splitLongStrip = settings.splitLongStripPages
-                            )
+                    if (isDualPageSpread && pageIdx + 1 < effectivePageCount) {
+                        // Dual-Page Book Spread (RTL Manga order: Right page = pageIdx, Left page = pageIdx + 1)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("reader_dual_page_spread"),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Box(modifier = Modifier.weight(1f).fillMaxSize()) {
+                                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                    item {
+                                        ChapterPageIllustration(
+                                            work = work,
+                                            chapterNumber = chapter.number,
+                                            pageIndex = pageIdx,
+                                            totalPages = effectivePageCount,
+                                            pageImageUrl = livePageUrls.getOrNull(pageIdx),
+                                            localFilePath = localPagePaths.getOrNull(pageIdx),
+                                            refererUrl = targetChapterUrl,
+                                            autoCropBorders = localAutoCrop,
+                                            colorFilterMode = localColorFilter,
+                                            splitLongStrip = settings.splitLongStripPages
+                                        )
+                                    }
+                                }
+                            }
+                            Box(modifier = Modifier.weight(1f).fillMaxSize()) {
+                                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                    item {
+                                        ChapterPageIllustration(
+                                            work = work,
+                                            chapterNumber = chapter.number,
+                                            pageIndex = pageIdx + 1,
+                                            totalPages = effectivePageCount,
+                                            pageImageUrl = livePageUrls.getOrNull(pageIdx + 1),
+                                            localFilePath = localPagePaths.getOrNull(pageIdx + 1),
+                                            refererUrl = targetChapterUrl,
+                                            autoCropBorders = localAutoCrop,
+                                            colorFilterMode = localColorFilter,
+                                            splitLongStrip = settings.splitLongStripPages
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            item {
+                                ChapterPageIllustration(
+                                    work = work,
+                                    chapterNumber = chapter.number,
+                                    pageIndex = pageIdx,
+                                    totalPages = effectivePageCount,
+                                    pageImageUrl = livePageUrls.getOrNull(pageIdx),
+                                    localFilePath = localPagePaths.getOrNull(pageIdx),
+                                    refererUrl = targetChapterUrl,
+                                    autoCropBorders = localAutoCrop,
+                                    colorFilterMode = localColorFilter,
+                                    splitLongStrip = settings.splitLongStripPages
+                                )
+                            }
                         }
                     }
                 }
@@ -1008,6 +1070,82 @@ fun MangaChapterReaderScreen(
                         )
                     }
 
+                    // Dual-Page Book Spread for Galaxy Z Fold 4 Unfolded Display
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                val nextDual = !isDualPageSpread
+                                isDualPageSpread = nextDual
+                                if (nextDual && isWebtoonMode) {
+                                    isWebtoonMode = false
+                                    onUpdateWebtoonMode(false)
+                                }
+                                onShowToast(if (nextDual) "تم تفعيل وضع الكتاب المزدوج (صفحتان متجاورتان)" else "تم إيقاف وضع الكتاب المزدوج")
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("toggle_dual_page_spread_row"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Checkbox(
+                            checked = isDualPageSpread,
+                            onCheckedChange = {
+                                isDualPageSpread = it
+                                if (it && isWebtoonMode) {
+                                    isWebtoonMode = false
+                                    onUpdateWebtoonMode(false)
+                                }
+                            },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = PeriwinklePrimary,
+                                checkmarkColor = PeriwinkleOnPrimary
+                            ),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Text(
+                            text = "وضع الكتاب المزدوج (Fold)",
+                            color = TextPrimaryWhite,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // Auto Crop White/Black Borders
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                val nextCrop = !localAutoCrop
+                                localAutoCrop = nextCrop
+                                onUpdateAutoCropBorders(nextCrop)
+                                onShowToast(if (nextCrop) "تم تفعيل القص التلقائي للحواشي البيضاء" else "تم إيقاف قص الحواشي")
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("toggle_auto_crop_borders_row"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Checkbox(
+                            checked = localAutoCrop,
+                            onCheckedChange = {
+                                localAutoCrop = it
+                                onUpdateAutoCropBorders(it)
+                            },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = PeriwinklePrimary,
+                                checkmarkColor = PeriwinkleOnPrimary
+                            ),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Text(
+                            text = "القص التلقائي للحواشي البيضاء",
+                            color = TextPrimaryWhite,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
                     // Reader Color Filter quick cycle row (Sepia / Smart Night Invert / Grayscale)
                     Row(
                         modifier = Modifier
@@ -1156,6 +1294,46 @@ fun MangaChapterReaderScreen(
                             .fillMaxWidth()
                             .padding(top = 8.dp, bottom = 4.dp)
                     ) {
+                        // Fast Thumbnail Page Scrubber Strip above the Page Slider
+                        if (totalPages > 1) {
+                            LazyRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                                    .testTag("reader_thumbnail_scrubber"),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                items(totalPages, key = { "thumb_scrub_$it" }) { idx ->
+                                    val isCurrent = idx == currentPageIndex
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isCurrent) PeriwinklePrimary else Color(0xFF232734),
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isCurrent) PeriwinklePrimary else Color(0xFF394054)
+                                        ),
+                                        modifier = Modifier
+                                            .height(28.dp)
+                                            .clickable { jumpToPage(idx) }
+                                            .testTag("reader_thumb_pill_$idx")
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.padding(horizontal = 9.dp)
+                                        ) {
+                                            Text(
+                                                text = "ص ${idx + 1}",
+                                                color = if (isCurrent) PeriwinkleOnPrimary else TextPrimaryWhite,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Row 1: Next/Prev Chapter Circular Buttons + Dotted Page Slider
                         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                             Row(

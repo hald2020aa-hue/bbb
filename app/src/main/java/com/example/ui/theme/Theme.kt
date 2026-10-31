@@ -18,8 +18,10 @@ fun MyApplicationTheme(
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
-    val bg = if (pureDarkMode) AppPureBlack else AppBackgroundDark
-    val surfaceColor = if (pureDarkMode) Color(0xFF0A0C10) else AppDrawerSurface
+    val bg = if (pureDarkMode) Color(0xFF000000) else AppBackgroundDark
+    val surfaceColor = if (pureDarkMode) Color(0xFF000000) else AppDrawerSurface
+    val cardVariantColor = if (pureDarkMode) Color(0xFF07090E) else AppCardSurface
+    val dividerColor = if (pureDarkMode) Color(0xFF1D2230) else AppDividerColor
 
     val (primaryColor, primaryContainerColor) = when (appThemeKey) {
         "GREEN" -> GreenThemePrimary to GreenThemeContainer
@@ -31,7 +33,17 @@ fun MyApplicationTheme(
     }
 
     val baseScheme = if (appThemeKey == "DYNAMIC_SYSTEM" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        dynamicDarkColorScheme(context)
+        dynamicDarkColorScheme(context).let { sys ->
+            if (pureDarkMode) {
+                sys.copy(
+                    background = Color(0xFF000000),
+                    surface = Color(0xFF000000),
+                    surfaceVariant = Color(0xFF07090E)
+                )
+            } else {
+                sys
+            }
+        }
     } else {
         darkColorScheme(
             primary = primaryColor,
@@ -46,9 +58,9 @@ fun MyApplicationTheme(
             onBackground = TextPrimaryWhite,
             surface = surfaceColor,
             onSurface = TextPrimaryWhite,
-            surfaceVariant = AppCardSurface,
+            surfaceVariant = cardVariantColor,
             onSurfaceVariant = TextSecondaryGrey,
-            outline = AppDividerColor
+            outline = dividerColor
         )
     }
 

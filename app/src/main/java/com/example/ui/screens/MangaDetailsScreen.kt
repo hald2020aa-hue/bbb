@@ -97,6 +97,7 @@ import com.example.ui.components.CloudflareProtectionDialog
 import com.example.ui.components.HiddenSiteWebViewBridge
 import com.example.ui.components.MangaCoverArtwork
 import com.example.ui.components.SiteIconBadge
+import com.example.ui.components.rememberDynamicCoverPalette
 import com.example.ui.theme.AppBackgroundDark
 import com.example.ui.theme.AppDialogSurface
 import com.example.ui.theme.AppDividerColor
@@ -246,6 +247,8 @@ fun MangaDetailsScreen(
         resumeLabel.ifBlank { effectiveResumeChapter?.lastReadTimeText ?: "" }
     }
 
+    val coverPalette = rememberDynamicCoverPalette(liveWork)
+
     // Adaptive Two-Pane Split Layout supporting both Samsung Galaxy Z Fold 4 Folded Cover Screen (الوضع المطوي) and Unfolded Main Screen (الوضع المفتوح)
     BoxWithConstraints(
         modifier = Modifier
@@ -289,9 +292,9 @@ fun MangaDetailsScreen(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    Color(0xCC0D1017),
-                                    Color(0xB310141F),
-                                    Color(0xD90B0E15)
+                                    coverPalette.dominantBackdropTop,
+                                    coverPalette.dominantBackdropMid,
+                                    coverPalette.dominantBackdropBottom
                                 )
                             )
                         )
@@ -356,9 +359,9 @@ fun MangaDetailsScreen(
                             }
 
                             Surface(
-                                color = Color(0xD9171A22),
+                                color = coverPalette.badgeSurface,
                                 shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, Color(0xFF2E3342)),
+                                border = BorderStroke(1.dp, coverPalette.badgeBorder),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
@@ -374,9 +377,9 @@ fun MangaDetailsScreen(
                             }
 
                             Surface(
-                                color = Color(0xD9171A22),
+                                color = coverPalette.badgeSurface,
                                 shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, Color(0xFF2E3342)),
+                                border = BorderStroke(1.dp, coverPalette.badgeBorder),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
@@ -407,7 +410,7 @@ fun MangaDetailsScreen(
                                     modifier = Modifier
                                         .width(88.dp)
                                         .height(126.dp)
-                                        .border(1.dp, Color(0xFF343B4D), RoundedCornerShape(8.dp))
+                                        .border(1.dp, coverPalette.badgeBorder, RoundedCornerShape(8.dp))
                                 )
 
                                 Column(
@@ -415,9 +418,9 @@ fun MangaDetailsScreen(
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Surface(
-                                        color = Color(0xD9171A22),
+                                        color = coverPalette.badgeSurface,
                                         shape = RoundedCornerShape(10.dp),
-                                        border = BorderStroke(1.dp, Color(0xFF2E3342)),
+                                        border = BorderStroke(1.dp, coverPalette.badgeBorder),
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
@@ -433,9 +436,9 @@ fun MangaDetailsScreen(
                                     }
 
                                     Surface(
-                                        color = Color(0xD9171A22),
+                                        color = coverPalette.badgeSurface,
                                         shape = RoundedCornerShape(10.dp),
-                                        border = BorderStroke(1.dp, Color(0xFF2E3342)),
+                                        border = BorderStroke(1.dp, coverPalette.badgeBorder),
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
@@ -720,7 +723,7 @@ fun MangaDetailsScreen(
                             )
                         }
                         Surface(
-                            color = Color(0xFF283149),
+                            color = coverPalette.accentPrimary,
                             shape = RoundedCornerShape(16.dp)
                         ) {
                             Row(
@@ -729,7 +732,7 @@ fun MangaDetailsScreen(
                             ) {
                                 Text(
                                     text = "إستمر",
-                                    color = PeriwinklePrimary,
+                                    color = coverPalette.accentOnPrimary,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -737,7 +740,7 @@ fun MangaDetailsScreen(
                                 Icon(
                                     imageVector = Icons.Default.PlayArrow,
                                     contentDescription = null,
-                                    tint = PeriwinklePrimary,
+                                    tint = coverPalette.accentOnPrimary,
                                     modifier = Modifier.size(14.dp)
                                 )
                             }

@@ -79,6 +79,7 @@ fun StorageSettingsScreen(
     onUpdateBoolean: (String, Boolean) -> Unit = { _, _ -> },
     onUpdateString: (String, String) -> Unit = { _, _ -> },
     onUpdateInt: (String, Int) -> Unit = { _, _ -> },
+    onCleanReadChaptersNow: () -> Unit = {},
     onBackClick: () -> Unit,
     onClearCache: () -> Unit,
     onClearSearchHistory: () -> Unit,
@@ -327,6 +328,27 @@ fun StorageSettingsScreen(
             checked = settings.autoDeleteReadChapters,
             onCheckedChange = { onUpdateBoolean("autoDeleteReadChapters", it) }
         )
+
+        // 1-Tap Clean Read Chapters Now Action
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.End
+        ) {
+            OutlinedButton(
+                onClick = onCleanReadChaptersNow,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.testTag("clean_read_chapters_now_btn")
+            ) {
+                Text(
+                    text = "تنظيف الفصول المقروءة الآن",
+                    color = PeriwinklePrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
 
         // WebP Image Compression (40%-60% space saving)
         SettingsSwitchItem(

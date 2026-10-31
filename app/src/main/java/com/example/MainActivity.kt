@@ -196,6 +196,7 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
     val diagnosticLogs by viewModel.diagnosticLogs.collectAsStateWithLifecycle()
     val readChaptersMap by viewModel.readChaptersMap.collectAsStateWithLifecycle()
     val readingProgressMap by viewModel.readingProgressMap.collectAsStateWithLifecycle()
+    val readingProgressList by viewModel.readingProgressList.collectAsStateWithLifecycle()
     val latestUpdates by viewModel.latestUpdates.collectAsStateWithLifecycle()
     val selectedUpdatesSourceId by viewModel.selectedUpdatesSourceId.collectAsStateWithLifecycle()
     val sourceUpdateStatuses by viewModel.sourceUpdateStatuses.collectAsStateWithLifecycle()
@@ -266,10 +267,15 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
         ) {
             when (currentScreen) {
                 AppScreen.STORAGE -> {
+                    val latestProg = readingProgressList.maxByOrNull { it.lastReadAt }
                     StorageLibraryScreen(
                         savedWorks = savedWorks,
                         downloadedWorks = downloadedWorks,
                         showContinueReadingButton = settings.showContinueReadingButton,
+                        lastReadWorkTitle = latestProg?.workTitle ?: "",
+                        lastReadChapterNumber = latestProg?.chapterNumber ?: 0,
+                        lastReadPageNumber = (latestProg?.lastPageIndex ?: 0) + 1,
+                        lastReadTotalPages = latestProg?.totalPages ?: 1,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onImportUri = { uri -> viewModel.importFileToStorage(uri) },
                         onOpenWork = { work ->
@@ -300,11 +306,16 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                 AppScreen.SITE_CATALOG -> {
                     val catalogWorks = MangaCatalogData.getCatalogForSite(selectedSite)
                     val siteCachedUpdates = latestUpdates.filter { it.sourceId == selectedSite.id }
+                    val latestProg = readingProgressList.maxByOrNull { it.lastReadAt }
                     SiteCatalogScreen(
                         site = selectedSite,
                         works = catalogWorks,
                         cachedSiteUpdates = siteCachedUpdates,
                         showContinueReadingButton = settings.showContinueReadingButton,
+                        lastReadWorkTitle = latestProg?.workTitle ?: "",
+                        lastReadChapterNumber = latestProg?.chapterNumber ?: 0,
+                        lastReadPageNumber = (latestProg?.lastPageIndex ?: 0) + 1,
+                        lastReadTotalPages = latestProg?.totalPages ?: 1,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onSelectWork = { work ->
                             viewModel.openMangaDetails(work)
@@ -468,6 +479,9 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         onUpdateWebtoonMode = { enabled ->
                             viewModel.setBooleanSetting("webtoonAlwaysOn", enabled)
                         },
+                        onUpdateAutoCropBorders = { enabled ->
+                            viewModel.setBooleanSetting("autoCropBorders", enabled)
+                        },
                         onUpdateColorFilter = { mode ->
                             viewModel.setStringSetting("readerColorFilter", mode)
                         },
@@ -614,6 +628,7 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                     FavoritesScreen(
                         favorites = favorites,
                         categories = categories,
+                        appLockPin = settings.appLockPin,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                         onOpenFavoriteUrl = { _, _ ->
                             viewModel.openMangaDetails(selectedWork)
@@ -709,6 +724,7 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         onUpdateBoolean = { k, v -> viewModel.setBooleanSetting(k, v) },
                         onUpdateString = { k, v -> viewModel.setStringSetting(k, v) },
                         onUpdateInt = { k, v -> viewModel.setIntSetting(k, v) },
+                        onCleanReadChaptersNow = { viewModel.cleanReadChaptersNow() },
                         onBackClick = { viewModel.navigateBack() },
                         onClearCache = { viewModel.clearAppCache() },
                         onClearSearchHistory = { viewModel.clearPreviousSearchHistory() },

@@ -647,8 +647,8 @@ fun AppearanceSettingsScreen(
         }
 
         SettingsSwitchItem(
-            title = "الوضع الداكن النقي",
-            subtitle = null,
+            title = "وضع شاشة OLED باللون الأسود النقي (AMOLED #000000)",
+            subtitle = "خلفية سوداء نقية 100% لتوفير البطارية وإبراز ألوان أغلفة المانهوا على شاشات سامسونج",
             checked = settings.pureDarkMode,
             onCheckedChange = { onToggleBoolean("pureDarkMode", it) }
         )

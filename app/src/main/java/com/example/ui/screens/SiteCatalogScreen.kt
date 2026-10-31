@@ -83,8 +83,11 @@ import com.example.data.MangaLatestUpdateItem
 import com.example.data.MangaWork
 import com.example.data.local.SiteEntity
 import com.example.ui.components.CloudflareProtectionDialog
+import com.example.ui.components.ContinueReadingHeroDock
 import com.example.ui.components.HiddenSiteWebViewBridge
 import com.example.ui.components.MangaCoverArtwork
+import com.example.ui.components.ShimmerCatalogGrid
+import com.example.ui.components.ShimmerUpdatesList
 import com.example.ui.theme.AppCardSurface
 import com.example.ui.theme.AppDialogSurface
 import com.example.ui.theme.AppDividerColor
@@ -101,6 +104,10 @@ fun SiteCatalogScreen(
     works: List<MangaWork>,
     cachedSiteUpdates: List<MangaLatestUpdateItem> = emptyList(),
     showContinueReadingButton: Boolean,
+    lastReadWorkTitle: String = "",
+    lastReadChapterNumber: Int = 0,
+    lastReadPageNumber: Int = 1,
+    lastReadTotalPages: Int = 1,
     onOpenDrawer: () -> Unit,
     onSelectWork: (MangaWork) -> Unit,
     onOpenUpdateWorkDetails: (MangaLatestUpdateItem) -> Unit = {},
@@ -604,19 +611,17 @@ fun SiteCatalogScreen(
                 }
 
                 if (isLoadingSiteUpdates && displayedSiteUpdates.isEmpty()) {
-                    Box(
+                    Column(
                         modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(color = PeriwinklePrimary)
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "جارٍ جلب آخر الفصول المحدثة من ${site.name}...",
-                                color = TextSecondaryGrey,
-                                fontSize = 14.sp
-                            )
-                        }
+                        Text(
+                            text = "جارٍ جلب آخر الفصول المحدثة من ${site.name}...",
+                            color = TextSecondaryGrey,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                        ShimmerUpdatesList(itemCount = 4)
                     }
                 } else if (displayedSiteUpdates.isEmpty()) {
                     Box(
@@ -760,16 +765,11 @@ fun SiteCatalogScreen(
 
             // Content Area
             if (isLoadingCatalog && displayedWorks.isEmpty()) {
-                Box(
+                Column(
                     modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "جار التحميل من الموقع",
-                        tint = Color(0xFF8C92A4),
-                        modifier = Modifier.size(64.dp)
-                    )
+                    ShimmerCatalogGrid(itemCount = 6)
                 }
             } else if (displayedWorks.isEmpty()) {
                 Box(
@@ -963,45 +963,18 @@ fun SiteCatalogScreen(
             } // end of CATALOG branch
         }
 
-        // Bottom-Left Floating "متابعة" Button
+        // Floating "Continue Reading Hero Dock"
         if (showContinueReadingButton) {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = Color(0xFF2A324B),
-                tonalElevation = 6.dp,
-                shadowElevation = 6.dp,
+            ContinueReadingHeroDock(
+                workTitle = lastReadWorkTitle,
+                chapterNumber = lastReadChapterNumber,
+                pageNumber = lastReadPageNumber,
+                totalPages = lastReadTotalPages,
+                onContinueClick = onContinueReadingClick,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 16.dp, bottom = 18.dp)
-                    .clickable { onContinueReadingClick() }
-                    .testTag("site_continue_reading_button")
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Book,
-                        contentDescription = null,
-                        tint = Color(0xFFD5DEFF),
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF1A1E2B))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "متابعة",
-                            color = TextPrimaryWhite,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
+            )
         }
     }
 
