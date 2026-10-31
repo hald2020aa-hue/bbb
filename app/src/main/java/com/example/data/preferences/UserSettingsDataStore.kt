@@ -58,10 +58,16 @@ data class UserSettings(
     val autoCropBorders: Boolean = false,
     val preloadNextChapter: Boolean = true,
     val tapZoneMode: String = "افتراضي (يمين/يسار/منتصف)", // "افتراضي (يمين/يسار/منتصف)", "معكوس (يسار للتالي)", "منتصف فقط للقائمة", "شبيه كيندل"
+    val readerColorFilter: String = "طبيعي (افتراضي)", // "طبيعي (افتراضي)" | "دافئ لحماية العين (Sepia)" | "عكس الألوان الذكي (ليلي)" | "تدرج رمادي مريح (Grayscale)"
+    val splitLongStripPages: Boolean = true,
     // Downloads & Offline Storage
     val preferredDownloadFormat: String = "تلقائي", // "تلقائي", "ملف CBZ واحد", "ملفات CBZ متعددة"
     val autoDeleteReadChapters: Boolean = false,
     val keepLastReadChaptersCount: Int = 2,
+    val compressDownloadsWebp: Boolean = false,
+    val nightlyDownloadScheduleEnabled: Boolean = false,
+    val autoWeeklyBackupEnabled: Boolean = true,
+    val readingStreakDays: Int = 3,
     val foldableCompactScale: Boolean = true,
     // Network & DNS over HTTPS (DoH)
     val dohProvider: String = "معطل", // "معطل", "Cloudflare (1.1.1.1)", "Google (8.8.8.8)", "AdGuard"
@@ -121,9 +127,15 @@ class UserSettingsDataStore(private val context: Context) {
         val AUTO_CROP_BORDERS = booleanPreferencesKey("auto_crop_borders")
         val PRELOAD_NEXT_CHAPTER = booleanPreferencesKey("preload_next_chapter")
         val TAP_ZONE_MODE = stringPreferencesKey("tap_zone_mode")
+        val READER_COLOR_FILTER = stringPreferencesKey("reader_color_filter")
+        val SPLIT_LONG_STRIP_PAGES = booleanPreferencesKey("split_long_strip_pages")
         val PREFERRED_DOWNLOAD_FORMAT = stringPreferencesKey("preferred_download_format")
         val AUTO_DELETE_READ_CHAPTERS = booleanPreferencesKey("auto_delete_read_chapters")
         val KEEP_LAST_READ_CHAPTERS_COUNT = intPreferencesKey("keep_last_read_chapters_count")
+        val COMPRESS_DOWNLOADS_WEBP = booleanPreferencesKey("compress_downloads_webp")
+        val NIGHTLY_DOWNLOAD_SCHEDULE_ENABLED = booleanPreferencesKey("nightly_download_schedule_enabled")
+        val AUTO_WEEKLY_BACKUP_ENABLED = booleanPreferencesKey("auto_weekly_backup_enabled")
+        val READING_STREAK_DAYS = intPreferencesKey("reading_streak_days")
         val FOLDABLE_COMPACT_SCALE = booleanPreferencesKey("foldable_compact_scale")
         val DOH_PROVIDER = stringPreferencesKey("doh_provider")
         val ANILIST_USERNAME = stringPreferencesKey("anilist_username")
@@ -179,9 +191,15 @@ class UserSettingsDataStore(private val context: Context) {
             autoCropBorders = prefs[Keys.AUTO_CROP_BORDERS] ?: false,
             preloadNextChapter = prefs[Keys.PRELOAD_NEXT_CHAPTER] ?: true,
             tapZoneMode = prefs[Keys.TAP_ZONE_MODE] ?: "افتراضي (يمين/يسار/منتصف)",
+            readerColorFilter = prefs[Keys.READER_COLOR_FILTER] ?: "طبيعي (افتراضي)",
+            splitLongStripPages = prefs[Keys.SPLIT_LONG_STRIP_PAGES] ?: true,
             preferredDownloadFormat = prefs[Keys.PREFERRED_DOWNLOAD_FORMAT] ?: "تلقائي",
             autoDeleteReadChapters = prefs[Keys.AUTO_DELETE_READ_CHAPTERS] ?: false,
             keepLastReadChaptersCount = prefs[Keys.KEEP_LAST_READ_CHAPTERS_COUNT] ?: 2,
+            compressDownloadsWebp = prefs[Keys.COMPRESS_DOWNLOADS_WEBP] ?: false,
+            nightlyDownloadScheduleEnabled = prefs[Keys.NIGHTLY_DOWNLOAD_SCHEDULE_ENABLED] ?: false,
+            autoWeeklyBackupEnabled = prefs[Keys.AUTO_WEEKLY_BACKUP_ENABLED] ?: true,
+            readingStreakDays = prefs[Keys.READING_STREAK_DAYS] ?: 3,
             foldableCompactScale = prefs[Keys.FOLDABLE_COMPACT_SCALE] ?: true,
             dohProvider = prefs[Keys.DOH_PROVIDER] ?: "معطل",
             anilistUsername = prefs[Keys.ANILIST_USERNAME] ?: "",
@@ -209,6 +227,7 @@ class UserSettingsDataStore(private val context: Context) {
                 "userProfileName" -> prefs[Keys.USER_PROFILE_NAME] = value
                 "userProfileEmail" -> prefs[Keys.USER_PROFILE_EMAIL] = value
                 "tapZoneMode" -> prefs[Keys.TAP_ZONE_MODE] = value
+                "readerColorFilter" -> prefs[Keys.READER_COLOR_FILTER] = value
                 "preferredDownloadFormat" -> prefs[Keys.PREFERRED_DOWNLOAD_FORMAT] = value
                 "dohProvider" -> prefs[Keys.DOH_PROVIDER] = value
                 "anilistUsername" -> prefs[Keys.ANILIST_USERNAME] = value
@@ -247,7 +266,11 @@ class UserSettingsDataStore(private val context: Context) {
                 "browserCoachmarkShown" -> prefs[Keys.BROWSER_COACHMARK_SHOWN] = value
                 "autoCropBorders" -> prefs[Keys.AUTO_CROP_BORDERS] = value
                 "preloadNextChapter" -> prefs[Keys.PRELOAD_NEXT_CHAPTER] = value
+                "splitLongStripPages" -> prefs[Keys.SPLIT_LONG_STRIP_PAGES] = value
                 "autoDeleteReadChapters" -> prefs[Keys.AUTO_DELETE_READ_CHAPTERS] = value
+                "compressDownloadsWebp" -> prefs[Keys.COMPRESS_DOWNLOADS_WEBP] = value
+                "nightlyDownloadScheduleEnabled" -> prefs[Keys.NIGHTLY_DOWNLOAD_SCHEDULE_ENABLED] = value
+                "autoWeeklyBackupEnabled" -> prefs[Keys.AUTO_WEEKLY_BACKUP_ENABLED] = value
                 "foldableCompactScale" -> prefs[Keys.FOLDABLE_COMPACT_SCALE] = value
                 "autoSyncTracking" -> prefs[Keys.AUTO_SYNC_TRACKING] = value
                 "anilistTrackingEnabled" -> prefs[Keys.ANILIST_TRACKING_ENABLED] = value
@@ -265,6 +288,7 @@ class UserSettingsDataStore(private val context: Context) {
                 "maxConcurrentDownloads" -> prefs[Keys.MAX_CONCURRENT_DOWNLOADS] = value
                 "searchHistoryCount" -> prefs[Keys.SEARCH_HISTORY_COUNT] = value
                 "keepLastReadChaptersCount" -> prefs[Keys.KEEP_LAST_READ_CHAPTERS_COUNT] = value
+                "readingStreakDays" -> prefs[Keys.READING_STREAK_DAYS] = value
             }
         }
     }

@@ -645,6 +645,7 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
             }
 
             showToast(toastMsg)
+            repository.mangaDownloadManager.compressDownloadsWebp = settings.value.compressDownloadsWebp
             val matchingSite = sites.value.find { it.id == work.sourceId || it.url == work.siteUrl }
             repository.mangaDownloadManager.enqueueChaptersDownload(
                 work = work,
@@ -769,12 +770,36 @@ class MainViewModel(val repository: AppRepository) : ViewModel() {
 
     fun exportChapterAsCbz(work: MangaWork, chapter: MangaChapter) {
         viewModelScope.launch {
-            val cbzFile = repository.exportChapterToCbz(work, chapter)
+            var cbzFile = repository.exportChapterToCbz(work, chapter)
+            if (cbzFile == null) {
+                showToast("جارٍ تجهيز وتنزيل صفحات الفصل لتصديره بصيغة CBZ...")
+                repository.mangaDownloadManager.compressDownloadsWebp = settings.value.compressDownloadsWebp
+                repository.downloadMangaChapterOffline(work, chapter)
+                cbzFile = repository.exportChapterToCbz(work, chapter)
+            }
             refreshStorageStats()
             if (cbzFile != null) {
-                showToast("تم تصدير الفصل بصيغة CBZ: ${cbzFile.name}")
+                showToast("تم حفظ الفصل كملف CBZ: ${cbzFile.name}")
             } else {
-                showToast("قم بتنزيل الفصل أولاً لتصديره بصيغة .cbz")
+                showToast("تعذر تصدير الفصل بصيغة .cbz حالياً")
+            }
+        }
+    }
+
+    fun exportChapterAsPdf(work: MangaWork, chapter: MangaChapter) {
+        viewModelScope.launch {
+            var pdfFile = repository.exportChapterToPdf(work, chapter)
+            if (pdfFile == null) {
+                showToast("جارٍ تجهيز وتنزيل صفحات الفصل لتصديره بصيغة PDF...")
+                repository.mangaDownloadManager.compressDownloadsWebp = settings.value.compressDownloadsWebp
+                repository.downloadMangaChapterOffline(work, chapter)
+                pdfFile = repository.exportChapterToPdf(work, chapter)
+            }
+            refreshStorageStats()
+            if (pdfFile != null) {
+                showToast("تم حفظ الفصل كملف PDF: ${pdfFile.name}")
+            } else {
+                showToast("تعذر تصدير الفصل بصيغة .pdf حالياً")
             }
         }
     }

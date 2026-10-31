@@ -370,6 +370,9 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         onExportChapterCbz = { work, chapter ->
                             viewModel.exportChapterAsCbz(work, chapter)
                         },
+                        onExportChapterPdf = { work, chapter ->
+                            viewModel.exportChapterAsPdf(work, chapter)
+                        },
                         onExportAllCbz = { work ->
                             viewModel.exportAllChaptersAsCbz(work)
                         },
@@ -456,8 +459,23 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                                 toastMsg = "بدأ تنزيل الفصل ${chapter.number}..."
                             )
                         },
+                        onExportChapterPdf = { work, chapter ->
+                            viewModel.exportChapterAsPdf(work, chapter)
+                        },
+                        onExportChapterCbz = { work, chapter ->
+                            viewModel.exportChapterAsCbz(work, chapter)
+                        },
                         onUpdateWebtoonMode = { enabled ->
                             viewModel.setBooleanSetting("webtoonAlwaysOn", enabled)
+                        },
+                        onUpdateColorFilter = { mode ->
+                            viewModel.setStringSetting("readerColorFilter", mode)
+                        },
+                        onUpdateAutoScroll = { enabled ->
+                            viewModel.setBooleanSetting("autoScroll", enabled)
+                        },
+                        onUpdateAutoScrollSpeed = { speed ->
+                            viewModel.setFloatSetting("autoScrollSpeed", speed)
                         },
                         onOpenReadingSettings = {
                             viewModel.navigateTo(AppScreen.SETTINGS_READING_OPTIONS)
@@ -724,6 +742,7 @@ fun MangaSitesReaderApp(viewModel: MainViewModel) {
                         sitesCount = sites.size,
                         historyCount = history.size,
                         favoritesCount = favorites.size,
+                        readingStreakDays = settings.readingStreakDays,
                         onBackClick = { viewModel.navigateBack() },
                         onResetStats = { viewModel.resetReadingStats() }
                     )

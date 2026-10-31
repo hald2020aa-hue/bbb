@@ -56,6 +56,9 @@ class MangaDownloadManager(
     private val _isAllPaused = MutableStateFlow(false)
     val isAllPaused: StateFlow<Boolean> = _isAllPaused.asStateFlow()
 
+    @Volatile
+    var compressDownloadsWebp: Boolean = false
+
     fun isChapterActivelyDownloading(chapterKey: String): Boolean =
         activeChapterKeys.contains(chapterKey)
 
@@ -347,7 +350,13 @@ class MangaDownloadManager(
                         work = work,
                         chapter = chapter
                     )
-                    if (pageResult.data.isEmpty()) {
+                    val combinedPages = if (pageResult.data.isNotEmpty()) {
+                        pageResult.data
+                    } else {
+                        // Fallback to LiveMangaSiteScraper (includes Headless WebView DOM extraction for JS-rendered sites)
+                        LiveMangaSiteScraper.fetchChapterPages(work, chapter).pageUrls
+                    }
+                    if (combinedPages.isEmpty()) {
                         val reason = pageResult.errorMessage ?: "تعذر استخراج روابط صور الفصل من صفحة المصدر"
                         DiagnosticLogger.logError(
                             category = DiagnosticCategory.DOWNLOAD,
@@ -370,7 +379,7 @@ class MangaDownloadManager(
                         return
                     }
                     val extracted = LinkedHashSet(
-                        pageResult.data.filter { it.isNotBlank() && !LiveMangaSiteScraper.isIgnoredAssetImage(it) }
+                        combinedPages.filter { it.isNotBlank() && !LiveMangaSiteScraper.isIgnoredAssetImage(it) }
                     ).toList()
                     LiveMangaSiteScraper.cacheChapterPages(chapter.chapterUrl, extracted)
                     extracted
@@ -479,7 +488,8 @@ class MangaDownloadManager(
                         chapterKey = chapterKey,
                         pageIndex = index,
                         bytes = pageBytes,
-                        extension = ext
+                        extension = ext,
+                        compressToWebp = compressDownloadsWebp
                     )
                     if (storageManager.isValidImageFile(savedFile)) {
                         savedLocalPaths.add(savedFile.absolutePath)

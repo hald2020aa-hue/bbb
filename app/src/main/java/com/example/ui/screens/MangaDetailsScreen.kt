@@ -36,6 +36,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FindReplace
@@ -120,6 +122,7 @@ fun MangaDetailsScreen(
     currentCategory: String = "أقرأها حالياً",
     onAssignCategory: (MangaWork, String) -> Unit = { _, _ -> },
     onExportChapterCbz: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
+    onExportChapterPdf: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
     onExportAllCbz: (MangaWork) -> Unit = {},
     isSearchingMigration: Boolean = false,
     migrationCandidates: List<MangaWork> = emptyList(),
@@ -986,6 +989,50 @@ fun MangaDetailsScreen(
                                             )
                                         }
                                     }
+
+                                    // 1-Tap Direct Chapter Download / Retry / Menu Button
+                                    IconButton(
+                                        onClick = {
+                                            if (isSaved) {
+                                                activeChapterMenuId = chapter.id
+                                            } else {
+                                                onDownloadChapters(
+                                                    liveWork,
+                                                    listOf(chapter),
+                                                    if (isIncomplete) "جارٍ استكمال تنزيل ${chapter.title}..." else "بدأ تنزيل ${chapter.title} للقراءة بدون إنترنت..."
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .size(34.dp)
+                                            .testTag("chapter_quick_download_${chapter.number}")
+                                    ) {
+                                        when {
+                                            isSaved -> Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = "محفوظ بدون إنترنت",
+                                                tint = Color(0xFF81C784),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            isDownloading -> CircularProgressIndicator(
+                                                color = PeriwinklePrimary,
+                                                strokeWidth = 2.dp,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            isIncomplete -> Icon(
+                                                imageVector = Icons.Default.Refresh,
+                                                contentDescription = "إعادة تنزيل الفصل",
+                                                tint = Color(0xFFFF8A80),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            else -> Icon(
+                                                imageVector = Icons.Default.Download,
+                                                contentDescription = "تنزيل الفصل بضغطة واحدة",
+                                                tint = PeriwinklePrimary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
                                 }
 
                                 // Chapter Context Menu
@@ -997,7 +1044,7 @@ fun MangaDetailsScreen(
                                     DropdownMenuItem(
                                         text = {
                                             Text(
-                                                text = if (isIncomplete) "استكمال / إعادة تنزيل الفصل" else "حفظ هذا الفصل",
+                                                text = if (isIncomplete) "استكمال / إعادة تنزيل الفصل" else "حفظ هذا الفصل للقراءة بدون إنترنت",
                                                 color = TextPrimaryWhite,
                                                 fontSize = 14.sp,
                                                 fontWeight = FontWeight.SemiBold
@@ -1054,22 +1101,34 @@ fun MangaDetailsScreen(
                                             )
                                         }
                                     )
-                                    if (isSaved) {
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    text = "تصدير الفصل بصيغة .cbz",
-                                                    color = PeriwinklePrimary,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
-                                            },
-                                            onClick = {
-                                                activeChapterMenuId = null
-                                                onExportChapterCbz(liveWork, chapter)
-                                            }
-                                        )
-                                    }
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = "حفظ وتصدير الفصل كملف PDF",
+                                                color = PeriwinklePrimary,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        },
+                                        onClick = {
+                                            activeChapterMenuId = null
+                                            onExportChapterPdf(liveWork, chapter)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = "تصدير الفصل بصيغة .cbz",
+                                                color = PeriwinklePrimary,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        },
+                                        onClick = {
+                                            activeChapterMenuId = null
+                                            onExportChapterCbz(liveWork, chapter)
+                                        }
+                                    )
                                     if (isSaved || isIncomplete) {
                                         DropdownMenuItem(
                                             text = {
@@ -1679,9 +1738,15 @@ fun MangaDetailsScreen(
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(candidate.title, color = TextPrimaryWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                        Text(candidate.siteName, color = PeriwinklePrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                        val latestCh = candidate.chapters.maxOfOrNull { it.number } ?: candidate.chaptersCount.coerceAtLeast(1)
+                                        Text(
+                                            text = "${candidate.siteName} • أحدث فصل: $latestCh",
+                                            color = PeriwinklePrimary,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
                                     }
-                                    Text("نقل", color = PeriwinklePrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text("نقل فوري", color = PeriwinklePrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

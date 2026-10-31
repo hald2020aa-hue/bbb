@@ -1294,20 +1294,41 @@ fun RecommendationsScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     items(siteWorks, key = { "${siteName}_${it.id}" }) { work ->
+                                        val latestCh = work.chapters.maxOfOrNull { it.number }
+                                            ?: work.chaptersCount.coerceAtLeast(1)
                                         Column(
                                             modifier = Modifier
-                                                .width(114.dp)
+                                                .width(118.dp)
                                                 .clip(RoundedCornerShape(10.dp))
                                                 .clickable { onSelectMangaWork(work) },
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
-                                            MangaCoverArtwork(
-                                                work = work,
+                                            Box(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .height(156.dp),
-                                                showArabicTitleBanner = false
-                                            )
+                                                    .height(156.dp)
+                                            ) {
+                                                MangaCoverArtwork(
+                                                    work = work,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    showArabicTitleBanner = false
+                                                )
+                                                Surface(
+                                                    color = Color(0xD9161922),
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    modifier = Modifier
+                                                        .align(Alignment.TopStart)
+                                                        .padding(5.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "فصل $latestCh",
+                                                        color = PeriwinklePrimary,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
                                             Spacer(modifier = Modifier.height(4.dp))
                                             Text(
                                                 text = work.title,

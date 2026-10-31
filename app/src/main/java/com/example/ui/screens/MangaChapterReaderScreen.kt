@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -136,7 +137,12 @@ fun MangaChapterReaderScreen(
     onSelectChapter: (MangaChapter) -> Unit,
     onToggleFavorite: (MangaWork) -> Unit,
     onDownloadChapter: (MangaWork, MangaChapter) -> Unit,
+    onExportChapterPdf: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
+    onExportChapterCbz: (MangaWork, MangaChapter) -> Unit = { _, _ -> },
     onUpdateWebtoonMode: (Boolean) -> Unit,
+    onUpdateColorFilter: (String) -> Unit = {},
+    onUpdateAutoScroll: (Boolean) -> Unit = {},
+    onUpdateAutoScrollSpeed: (Float) -> Unit = {},
     onOpenReadingSettings: () -> Unit,
     onShowToast: (String) -> Unit
 ) {
@@ -262,6 +268,12 @@ fun MangaChapterReaderScreen(
     var zoomOffsetX by remember { mutableFloatStateOf(0f) }
     var zoomOffsetY by remember { mutableFloatStateOf(0f) }
     var isWebtoonMode by remember(settings.webtoonAlwaysOn) { mutableStateOf(settings.webtoonAlwaysOn) }
+    var localColorFilter by remember(settings.readerColorFilter) { mutableStateOf(settings.readerColorFilter) }
+    var localAutoScroll by remember(settings.autoScroll) { mutableStateOf(settings.autoScroll) }
+    var localAutoScrollSpeed by remember(settings.autoScrollSpeed) {
+        mutableFloatStateOf(settings.autoScrollSpeed.coerceIn(0.1f, 1.0f))
+    }
+    var isUserTouchingScreen by remember { mutableStateOf(false) }
     val readerFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
@@ -326,13 +338,26 @@ fun MangaChapterReaderScreen(
         }
     }
 
-    // Auto-scroll support if enabled in settings
-    LaunchedEffect(settings.autoScroll, isChapterLoaded, isWebtoonMode, totalPages) {
-        if (settings.autoScroll && isChapterLoaded && isWebtoonMode && effectivePageCount > 0) {
-            while (true) {
-                delay(1800)
-                val next = (webtoonListState.firstVisibleItemIndex + 1).coerceAtMost(totalPages - 1)
-                webtoonListState.animateScrollToItem(next)
+    // Smart Touch-Aware Auto-Scroll: pauses immediately on finger touch and resumes on release
+    LaunchedEffect(localAutoScroll, localAutoScrollSpeed, isUserTouchingScreen, isChapterLoaded, isWebtoonMode, totalPages) {
+        if (localAutoScroll && !isUserTouchingScreen && isChapterLoaded && effectivePageCount > 0) {
+            if (isWebtoonMode) {
+                while (true) {
+                    delay(32L)
+                    if (!isUserTouchingScreen) {
+                        val pxPerFrame = (2.5f + localAutoScrollSpeed * 16f)
+                        webtoonListState.scrollBy(pxPerFrame)
+                    }
+                }
+            } else {
+                val intervalMs = (3600L - (localAutoScrollSpeed * 2400f).toLong()).coerceIn(900L, 4000L)
+                while (true) {
+                    delay(intervalMs)
+                    if (!isUserTouchingScreen) {
+                        val next = (pagerState.currentPage + 1).coerceAtMost(totalPages - 1)
+                        pagerState.animateScrollToPage(next)
+                    }
+                }
             }
         }
     }
@@ -412,6 +437,14 @@ fun MangaChapterReaderScreen(
                     }
                 } else {
                     false
+                }
+            }
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                        isUserTouchingScreen = event.changes.any { it.pressed }
+                    }
                 }
             }
             .pointerInput(settings.tapZoneMode, settings.webtoonZoom, isWebtoonMode, totalPages) {
@@ -623,7 +656,9 @@ fun MangaChapterReaderScreen(
                             pageImageUrl = livePageUrls.getOrNull(pageIdx),
                             localFilePath = localPagePaths.getOrNull(pageIdx),
                             refererUrl = targetChapterUrl,
-                            autoCropBorders = settings.autoCropBorders
+                            autoCropBorders = settings.autoCropBorders,
+                            colorFilterMode = localColorFilter,
+                            splitLongStrip = settings.splitLongStripPages
                         )
                     }
 
@@ -699,9 +734,84 @@ fun MangaChapterReaderScreen(
                                 pageImageUrl = livePageUrls.getOrNull(pageIdx),
                                 localFilePath = localPagePaths.getOrNull(pageIdx),
                                 refererUrl = targetChapterUrl,
-                                autoCropBorders = settings.autoCropBorders
+                                autoCropBorders = settings.autoCropBorders,
+                                colorFilterMode = localColorFilter,
+                                splitLongStrip = settings.splitLongStripPages
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        // Floating Smart Auto-Scroll Speed Controller Pill (pauses automatically when touching screen)
+        AnimatedVisibility(
+            visible = localAutoScroll,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 10.dp)
+        ) {
+            Surface(
+                color = Color(0xE6181C26),
+                shape = RoundedCornerShape(22.dp),
+                tonalElevation = 8.dp,
+                shadowElevation = 6.dp,
+                modifier = Modifier.testTag("reader_auto_scroll_floating_bar")
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (isUserTouchingScreen) "مؤقت ✋" else "تمرير تلقائي",
+                        color = if (isUserTouchingScreen) Color(0xFFFFB74D) else PeriwinklePrimary,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        onClick = {
+                            val updated = (localAutoScrollSpeed + 0.15f).coerceIn(0.1f, 1.0f)
+                            localAutoScrollSpeed = updated
+                            onUpdateAutoScrollSpeed(updated)
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Text("+", color = TextPrimaryWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Text(
+                        text = String.format(java.util.Locale.US, "%.1fx", 0.5f + localAutoScrollSpeed * 2.0f),
+                        color = TextPrimaryWhite,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        onClick = {
+                            val updated = (localAutoScrollSpeed - 0.15f).coerceIn(0.1f, 1.0f)
+                            localAutoScrollSpeed = updated
+                            onUpdateAutoScrollSpeed(updated)
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Text("−", color = TextPrimaryWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    IconButton(
+                        onClick = {
+                            localAutoScroll = false
+                            onUpdateAutoScroll(false)
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "إيقاف التمرير التلقائي",
+                            tint = Color(0xFFFF8A80),
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
             }
@@ -828,7 +938,7 @@ fun MangaChapterReaderScreen(
                 tonalElevation = 8.dp,
                 shadowElevation = 8.dp,
                 modifier = Modifier
-                    .width(215.dp)
+                    .width(245.dp)
                     .testTag("reader_quick_tune_popup")
             ) {
                 Column(modifier = Modifier.padding(vertical = 6.dp)) {
@@ -869,10 +979,128 @@ fun MangaChapterReaderScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
+                                val updated = !localAutoScroll
+                                localAutoScroll = updated
+                                onUpdateAutoScroll(updated)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("toggle_auto_scroll_row"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Checkbox(
+                            checked = localAutoScroll,
+                            onCheckedChange = {
+                                localAutoScroll = it
+                                onUpdateAutoScroll(it)
+                            },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = PeriwinklePrimary,
+                                checkmarkColor = PeriwinkleOnPrimary
+                            ),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Text(
+                            text = "التمرير التلقائي الذكي",
+                            color = TextPrimaryWhite,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // Reader Color Filter quick cycle row (Sepia / Smart Night Invert / Grayscale)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                val modes = listOf(
+                                    "طبيعي (افتراضي)",
+                                    "دافئ لحماية العين (Sepia)",
+                                    "عكس الألوان الذكي (ليلي)",
+                                    "تدرج رمادي مريح (Grayscale)"
+                                )
+                                val nextIdx = (modes.indexOf(localColorFilter) + 1) % modes.size
+                                val nextFilter = modes[nextIdx]
+                                localColorFilter = nextFilter
+                                onUpdateColorFilter(nextFilter)
+                                onShowToast("فلتر القراءة: $nextFilter")
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("cycle_color_filter_row"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = localColorFilter.substringBefore(" ("),
+                            color = PeriwinklePrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "فلتر ألوان العين / ليلي",
+                            color = TextPrimaryWhite,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    // 1-Tap Save as PDF or CBZ
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                showQuickTunePopup = false
+                                onExportChapterPdf(
+                                    work,
+                                    chapter.copy(
+                                        pageImageUrls = livePageUrls,
+                                        localPagePaths = localPagePaths,
+                                        pageCount = effectivePageCount
+                                    )
+                                )
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp)
+                                .testTag("reader_export_pdf_btn")
+                        ) {
+                            Text("حفظ PDF", color = PeriwinklePrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                showQuickTunePopup = false
+                                onExportChapterCbz(
+                                    work,
+                                    chapter.copy(
+                                        pageImageUrls = livePageUrls,
+                                        localPagePaths = localPagePaths,
+                                        pageCount = effectivePageCount
+                                    )
+                                )
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(32.dp)
+                                .testTag("reader_export_cbz_btn")
+                        ) {
+                            Text("حفظ CBZ", color = PeriwinklePrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
                                 showQuickTunePopup = false
                                 showDiagnosticsDialog = true
                             }
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.End
                     ) {
@@ -891,7 +1119,7 @@ fun MangaChapterReaderScreen(
                                 showQuickTunePopup = false
                                 onOpenReadingSettings()
                             }
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
                             .testTag("open_reading_settings_from_reader"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.End

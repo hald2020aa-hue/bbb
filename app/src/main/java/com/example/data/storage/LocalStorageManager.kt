@@ -112,17 +112,45 @@ class LocalStorageManager(private val context: Context) {
         chapterKey: String,
         pageIndex: Int,
         bytes: ByteArray,
-        extension: String = "jpg"
+        extension: String = "jpg",
+        compressToWebp: Boolean = false
     ): File {
         val chapterDir = getChapterDir(sourceId, workId, chapterKey)
-        val safeExt = extension.lowercase().takeIf { it in setOf("jpg", "jpeg", "png", "webp", "gif") } ?: "jpg"
+        val (finalBytes, finalExt) = if (compressToWebp && extension.lowercase() != "webp") {
+            try {
+                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (decoded != null) {
+                    val out = ByteArrayOutputStream()
+                    @Suppress("DEPRECATION")
+                    val format = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        Bitmap.CompressFormat.WEBP_LOSSY
+                    } else {
+                        Bitmap.CompressFormat.WEBP
+                    }
+                    decoded.compress(format, 80, out)
+                    val webpBytes = out.toByteArray()
+                    if (webpBytes.size in 128 until bytes.size) {
+                        webpBytes to "webp"
+                    } else {
+                        bytes to extension
+                    }
+                } else {
+                    bytes to extension
+                }
+            } catch (_: Throwable) {
+                bytes to extension
+            }
+        } else {
+            bytes to extension
+        }
+        val safeExt = finalExt.lowercase().takeIf { it in setOf("jpg", "jpeg", "png", "webp", "gif") } ?: "jpg"
         val fileName = String.format("page_%03d.%s", pageIndex + 1, safeExt)
         val pageFile = File(chapterDir, fileName)
         val tmpFile = File(chapterDir, "$fileName.tmp")
-        tmpFile.writeBytes(bytes)
+        tmpFile.writeBytes(finalBytes)
         if (pageFile.exists()) pageFile.delete()
         if (!tmpFile.renameTo(pageFile)) {
-            pageFile.writeBytes(bytes)
+            pageFile.writeBytes(finalBytes)
             tmpFile.delete()
         }
         return pageFile
@@ -612,6 +640,56 @@ class LocalStorageManager(private val context: Context) {
         }
     }
 
+    /**
+     * حفظ وتصدير الفصل كملف PDF بضغطة واحدة للمشاركة والقراءة الخارجية
+     */
+    fun exportChapterToPdf(
+        sourceId: Long,
+        workId: String,
+        workTitle: String,
+        chapterNumber: Int,
+        chapterTitle: String,
+        localPaths: List<String>
+    ): File? {
+        val validFiles = localPaths
+            .map { File(it) }
+            .filter { it.exists() && it.isFile && it.length() >= 64L }
+        if (validFiles.isEmpty()) return null
+
+        return try {
+            val exportDir = File(getRootSavedDir(), "exports_pdf").apply { if (!exists()) mkdirs() }
+            val safeTitle = sanitizeSegment(workTitle).take(40)
+            val pdfFile = File(exportDir, "${safeTitle}_ch_${chapterNumber}.pdf")
+            val pdfDocument = android.graphics.pdf.PdfDocument()
+            try {
+                validFiles.forEachIndexed { idx, imgFile ->
+                    val opts = BitmapFactory.Options().apply {
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                    }
+                    val bmp = BitmapFactory.decodeFile(imgFile.absolutePath, opts)
+                    if (bmp != null && bmp.width > 0 && bmp.height > 0) {
+                        val pageInfo = android.graphics.pdf.PdfDocument.PageInfo.Builder(
+                            bmp.width.coerceAtLeast(100),
+                            bmp.height.coerceAtLeast(100),
+                            idx + 1
+                        ).create()
+                        val page = pdfDocument.startPage(pageInfo)
+                        page.canvas.drawBitmap(bmp, 0f, 0f, null)
+                        pdfDocument.finishPage(page)
+                    }
+                }
+                pdfFile.outputStream().use { out ->
+                    pdfDocument.writeTo(out)
+                }
+            } finally {
+                pdfDocument.close()
+            }
+            if (pdfFile.exists() && pdfFile.length() > 100L) pdfFile else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     companion object {
         fun sanitizeSegment(raw: String): String {
             return raw.replace(Regex("[^a-zA-Z0-9_\\-\u0600-\u06FF]"), "_")
@@ -623,6 +701,31 @@ class LocalStorageManager(private val context: Context) {
             val safeWork = sanitizeSegment(workId)
             val safeChId = sanitizeSegment(chapterId.ifBlank { "ch_$chapterNumber" })
             return "src_${sourceId}_${safeWork}_${chapterNumber}_$safeChId"
+        }
+
+        /**
+         * تقسيم الصور الطويلة جداً تلقائياً (Smart Long-Strip Splitter) لضمان دقة فائقة وسرعة تمرير 120Hz
+         */
+        fun splitTallBitmapIfNeeded(bitmap: Bitmap, maxSliceHeight: Int = 2400): List<Bitmap> {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= maxSliceHeight || h < w * 2.6f) {
+                return listOf(bitmap)
+            }
+            return try {
+                val slices = mutableListOf<Bitmap>()
+                var y = 0
+                while (y < h) {
+                    val sliceH = minOf(maxSliceHeight, h - y)
+                    if (sliceH > 0) {
+                        slices.add(Bitmap.createBitmap(bitmap, 0, y, w, sliceH))
+                    }
+                    y += sliceH
+                }
+                if (slices.isNotEmpty()) slices else listOf(bitmap)
+            } catch (_: Throwable) {
+                listOf(bitmap)
+            }
         }
 
         /**

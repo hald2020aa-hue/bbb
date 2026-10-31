@@ -47,6 +47,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -296,12 +299,49 @@ fun ChapterPageIllustration(
     localFilePath: String? = null,
     refererUrl: String? = null,
     autoCropBorders: Boolean = false,
+    colorFilterMode: String = "طبيعي (افتراضي)",
+    splitLongStrip: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val imageLoader = remember(context) { MangaCoilImageLoader.get(context) }
     var retryNonce by remember(pageImageUrl, localFilePath) { mutableIntStateOf(0) }
     var lastErrorReason by remember(pageImageUrl, localFilePath) { mutableStateOf("") }
+
+    val activeColorFilter: ColorFilter? = remember(colorFilterMode) {
+        when (colorFilterMode) {
+            "دافئ لحماية العين (Sepia)" -> {
+                ColorFilter.colorMatrix(
+                    ColorMatrix(
+                        floatArrayOf(
+                            0.393f, 0.769f, 0.189f, 0f, 12f,
+                            0.349f, 0.686f, 0.168f, 0f, 8f,
+                            0.272f, 0.534f, 0.131f, 0f, 0f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            "عكس الألوان الذكي (ليلي)" -> {
+                ColorFilter.colorMatrix(
+                    ColorMatrix(
+                        floatArrayOf(
+                            -0.299f, -0.587f, -0.114f, 0f, 248f,
+                            -0.299f, -0.587f, -0.114f, 0f, 248f,
+                            -0.299f, -0.587f, -0.114f, 0f, 252f,
+                            0f, 0f, 0f, 1f, 0f
+                        )
+                    )
+                )
+            }
+            "تدرج رمادي مريح (Grayscale)" -> {
+                ColorFilter.colorMatrix(
+                    ColorMatrix().apply { setToSaturation(0f) }
+                )
+            }
+            else -> null
+        }
+    }
 
     val cleanLocalPath = remember(localFilePath, pageImageUrl) {
         when {
@@ -552,7 +592,30 @@ fun ChapterPageIllustration(
                     }
                 }
             } else {
-                SubcomposeAsyncImageContent()
+                val drawable = state.result.drawable
+                val rawBitmap = (drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+                val slices = remember(rawBitmap, splitLongStrip) {
+                    if (splitLongStrip && rawBitmap != null && rawBitmap.height > 2600 && rawBitmap.height > rawBitmap.width * 2.6f) {
+                        com.example.data.storage.LocalStorageManager.splitTallBitmapIfNeeded(rawBitmap, 2400)
+                    } else {
+                        null
+                    }
+                }
+                if (slices != null && slices.size > 1) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        slices.forEachIndexed { sliceIdx, sliceBmp ->
+                            androidx.compose.foundation.Image(
+                                bitmap = remember(sliceBmp) { sliceBmp.asImageBitmap() },
+                                contentDescription = "صفحة ${pageIndex + 1} - جزء ${sliceIdx + 1}",
+                                contentScale = ContentScale.FillWidth,
+                                colorFilter = activeColorFilter,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                } else {
+                    SubcomposeAsyncImageContent(colorFilter = activeColorFilter)
+                }
             }
         }
     )

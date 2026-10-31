@@ -669,6 +669,40 @@ class AppRepository(
         file
     }
 
+    suspend fun exportChapterToPdf(work: MangaWork, chapter: MangaChapter): File? = withContext(Dispatchers.IO) {
+        val chapterKey = chapter.chapterKey.ifBlank { "${work.id}_ch_${chapter.number}" }
+        val chEntity = dao.getDownloadedChapterByKey(chapterKey)
+            ?: dao.getDownloadedChaptersForWorkOnce(work.id).find { it.chapterNumber == chapter.number }
+        val localPaths = if (chapter.localPagePaths.isNotEmpty()) {
+            chapter.localPagePaths
+        } else if (chEntity != null) {
+            localStorageManager.decodeLocalPathsJson(chEntity.localPagesJson)
+        } else {
+            emptyList()
+        }
+        if (localPaths.isEmpty()) return@withContext null
+        val file = localStorageManager.exportChapterToPdf(
+            sourceId = work.sourceId,
+            workId = work.id,
+            workTitle = work.title,
+            chapterNumber = chapter.number,
+            chapterTitle = chapter.title,
+            localPaths = localPaths
+        )
+        if (file != null) {
+            dao.insertSavedWork(
+                SavedWorkEntity(
+                    title = "${work.title} - الفصل ${chapter.number} (.pdf)",
+                    sourceUrl = work.mangaUrl.ifBlank { "pdf://${work.id}/${chapter.number}" },
+                    localFilePath = file.absolutePath,
+                    fileSizeBytes = file.length(),
+                    fileType = "DOWNLOAD"
+                )
+            )
+        }
+        file
+    }
+
     suspend fun exportWorkToCbzFiles(work: MangaWork): List<File> = withContext(Dispatchers.IO) {
         val exported = mutableListOf<File>()
         val downloadedChapters = dao.getDownloadedChaptersForWorkOnce(work.id)
